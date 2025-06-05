@@ -19,6 +19,10 @@ namespace cAlgo.Robots
         private const string PendingSlLineName = "SB_PendingSlLine";
         private const string PendingTpLineName = "SB_PendingTpLine";
 
+        // Daily Trading Limits
+        private int _tradesTakenToday = 0;
+        private bool _dailyProfitTargetMet = false;
+
         [Parameter("Minutes Before Session for Liquidity", DefaultValue = 10)]
         public int MinutesBeforeSessionForLiquidity { get; set; }
 
@@ -31,6 +35,9 @@ namespace cAlgo.Robots
         [Parameter("Context TimeFrame", DefaultValue = "m15")]
         public string ContextTimeFrameString { get; set; }
 
+        [Parameter("Execution TimeFrame", DefaultValue = "m3")]
+        public string ExecutionTimeFrameString { get; set; }
+
         [Parameter("Swing Lookback Period", DefaultValue = 20, MinValue = 3)]
         public int SwingLookbackPeriod { get; set; }
 
@@ -40,6 +47,7 @@ namespace cAlgo.Robots
         // New York TimeZoneInfo
         private TimeZoneInfo _newYorkTimeZone;
         private TimeFrame _contextTimeFrame;
+        private TimeFrame _executionTimeFrame;
 
         // Session timing and liquidity state
         private DateTime _session1ActualStartNY, _session2ActualStartNY, _session3ActualStartNY;
@@ -118,11 +126,22 @@ namespace cAlgo.Robots
             }
             _contextTimeFrameTimeSpan = GetTimeFrameTimeSpan(_contextTimeFrame); // Initialize TimeSpan for context timeframe
 
+            try
+            {
+                _executionTimeFrame = TimeFrame.Parse(ExecutionTimeFrameString);
+            }
+            catch (ArgumentException)
+            {
+                Print($"Error parsing ExecutionTimeFrameString: '{ExecutionTimeFrameString}'. Defaulting to m3.");
+                _executionTimeFrame = TimeFrame.Minute3;
+            }
+
             Print("Silver Bullet Bot Started.");
             Print("Trading Sessions (NY Time): 03:00-04:00, 10:00-11:00, 14:00-15:00");
             Print($"Liquidity lookback: {MinutesBeforeSessionForLiquidity} minutes before session start.");
             Print($"Risk per trade: {RiskPercentage}%, RR: {RiskRewardRatio}");
             Print($"Context TimeFrame: {_contextTimeFrame}");
+            Print($"Execution TimeFrame: {_executionTimeFrame}");
             Print($"Swing Lookback: {SwingLookbackPeriod} bars, Swing Candles: {SwingCandles}");
 
             PendingOrders.Filled += OnPendingOrderFilled;
@@ -152,7 +171,7 @@ namespace cAlgo.Robots
                 
                 if (_relevantSwingLevelForBOS != 0) 
                 {
-                    CheckForBOS(currentTimeNY, contextBars);
+                    CheckForBOSAndFVG(currentTimeNY);
                 }
             }
             else if (currentSession.IsActivePeriod)
@@ -249,6 +268,10 @@ namespace cAlgo.Robots
                  _sweepBarOpenTimeNY = DateTime.MinValue;
                 _sweepBarActualHighOnContextTF = 0;
                 _sweepBarActualLowOnContextTF = 0;
+
+                // Reset daily limits
+                _tradesTakenToday = 0;
+                _dailyProfitTargetMet = false;
             }
         }
 
@@ -490,87 +513,119 @@ namespace cAlgo.Robots
             }
         }
 
-        private void CheckForBOS(DateTime currentTimeNY, Bars contextBars)
+        private void CheckForBOSAndFVG(DateTime currentTimeNY)
         {
-            if (_lastSweepType == SweepType.None || _relevantSwingLevelForBOS == 0 || contextBars.Count == 0 || _sweepBarOpenTimeNY == DateTime.MinValue)
+            if (_lastSweepType == SweepType.None || _relevantSwingLevelForBOS == 0 || _sweepBarOpenTimeNY == DateTime.MinValue)
             {
                 return;
             }
 
-            DateTime sweepBarTimeUtc = TimeZoneInfo.ConvertTime(_sweepBarOpenTimeNY, _newYorkTimeZone, TimeZoneInfo.Utc);
-            int firstBarToCheckForBOSIndex = contextBars.OpenTimes.GetIndexByTime(sweepBarTimeUtc);
-            if (firstBarToCheckForBOSIndex < 0) { // Should not happen if _sweepBarOpenTimeNY is valid
-                 Print($"Error finding sweep bar index in CheckForBOS for time: {_sweepBarOpenTimeNY}. Resetting.");
-                 _lastSweepType = SweepType.None;
-                 return;
-            }
-            // We start checking for BOS from the bar *after* the sweep bar, or the sweep bar itself if it\'s a very strong move.
-            // The FVG can form on the sweep bar itself or subsequent bars.
-            // The loop for BOS bar candidates will iterate from current closed bars backwards.
-            // The loop for FVG will then iterate from the BOS bar backwards to the sweep bar.
-
-            for (int bosCandidateBarIndex = contextBars.Count - 2; bosCandidateBarIndex > firstBarToCheckForBOSIndex; bosCandidateBarIndex--) 
+            var executionBars = MarketData.GetBars(_executionTimeFrame);
+            if (executionBars.Count < SwingCandles * 2 + 1) // Need enough bars for FVG and BOS checks
             {
-                //Ensure bosCandidateBarIndex is not before or at the swing bar itself for BOS check.
-                 DateTime bosCandidateBarOpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[bosCandidateBarIndex]);
-                if (bosCandidateBarOpenTimeNY <= _relevantSwingBarTimeNY) 
+                Print($"CheckForBOSAndFVG: Not enough bars on {_executionTimeFrame} ({executionBars.Count}) to proceed.");
+                return;
+            }
+
+            DateTime sweepBarTimeUtc = TimeZoneInfo.ConvertTime(_sweepBarOpenTimeNY, _newYorkTimeZone, TimeZoneInfo.Utc);
+            // Find the execution bar index that is at or after the M15 sweep bar's open time
+            int firstBarToCheckForBOSIndexOnExecutionTF = executionBars.OpenTimes.GetIndexByTime(sweepBarTimeUtc);
+            if (firstBarToCheckForBOSIndexOnExecutionTF < 0) {
+                // If exact time not found, try next available bar
+                for(int i = 0; i < executionBars.Count; i++)
+                {
+                    if (executionBars.OpenTimes[i] >= sweepBarTimeUtc)
+                    {
+                        firstBarToCheckForBOSIndexOnExecutionTF = i;
+                        break;
+                    }
+                }
+                if (firstBarToCheckForBOSIndexOnExecutionTF < 0)
+                {
+                    Print($"Error finding execution bar index in CheckForBOSAndFVG for M15 sweep bar time: {_sweepBarOpenTimeNY:yyyy-MM-dd HH:mm} (UTC: {sweepBarTimeUtc}). Resetting.");
+                    _lastSweepType = SweepType.None;
+                    _relevantSwingLevelForBOS = 0;
+                    ClearBosAndFvgDrawings();
+                    return;
+                }
+            }
+            
+            // Loop for BOS candidate bar on execution timeframe (e.g., M3)
+            // Start from the second to last bar, as the last bar is still forming.
+            for (int bosCandidateBarIndex = executionBars.Count - 2; bosCandidateBarIndex > firstBarToCheckForBOSIndexOnExecutionTF; bosCandidateBarIndex--) 
+            {
+                DateTime bosCandidateBarOpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[bosCandidateBarIndex]);
+                // Ensure bosCandidateBarIndex is not before or at the M15 swing bar time itself for BOS check.
+                // _relevantSwingBarTimeNY is the open time of the M15 swing bar.
+                if (_relevantSwingBarTimeNY != DateTime.MinValue && bosCandidateBarOpenTimeNY <= _relevantSwingBarTimeNY) 
                     continue;
 
                 bool bosConfirmedThisBar = false;
-                if (_lastSweepType == SweepType.HighSwept && contextBars.ClosePrices[bosCandidateBarIndex] < _relevantSwingLevelForBOS) 
+                if (_lastSweepType == SweepType.HighSwept && executionBars.ClosePrices[bosCandidateBarIndex] < _relevantSwingLevelForBOS) 
                 {
                     _bosLevel = _relevantSwingLevelForBOS; 
-                    _bosTimeNY = bosCandidateBarOpenTimeNY;
-                    Print($"BEARISH BOS DETECTED at bar {_bosTimeNY:yyyy-MM-dd HH:mm} NY. Structure broken below Swing Low: {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)}. Sweep was: {_lastSweepType}");
+                    _bosTimeNY = bosCandidateBarOpenTimeNY; // M3 bar time
+                    Print($"BEARISH BOS DETECTED on {_executionTimeFrame} at bar {_bosTimeNY:yyyy-MM-dd HH:mm} NY. Structure broken below Swing Low (M15): {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)}. Sweep was: {_lastSweepType}");
                     bosConfirmedThisBar = true;
                 }
-                else if (_lastSweepType == SweepType.LowSwept && contextBars.ClosePrices[bosCandidateBarIndex] > _relevantSwingLevelForBOS) 
+                else if (_lastSweepType == SweepType.LowSwept && executionBars.ClosePrices[bosCandidateBarIndex] > _relevantSwingLevelForBOS) 
                 {
                     _bosLevel = _relevantSwingLevelForBOS;
-                    _bosTimeNY = bosCandidateBarOpenTimeNY;
-                    Print($"BULLISH BOS DETECTED at bar {_bosTimeNY:yyyy-MM-dd HH:mm} NY. Structure broken above Swing High: {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)}. Sweep was: {_lastSweepType}");
+                    _bosTimeNY = bosCandidateBarOpenTimeNY; // M3 bar time
+                    Print($"BULLISH BOS DETECTED on {_executionTimeFrame} at bar {_bosTimeNY:yyyy-MM-dd HH:mm} NY. Structure broken above Swing High (M15): {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)}. Sweep was: {_lastSweepType}");
                     bosConfirmedThisBar = true;
                 }
 
                 if (bosConfirmedThisBar)
                 {
-                    // Now search for FVG from bosCandidateBarIndex down to firstBarToCheckForBOSIndex (sweep bar index)
-                    for (int fvgSearchIndex = bosCandidateBarIndex; fvgSearchIndex >= firstBarToCheckForBOSIndex; fvgSearchIndex--)
+                    // Now search for FVG on execution TF (e.g. M3)
+                    // from bosCandidateBarIndex down to firstBarToCheckForBOSIndexOnExecutionTF (M3 bar corresponding to M15 sweep bar)
+                    for (int fvgSearchIndex = bosCandidateBarIndex; fvgSearchIndex >= firstBarToCheckForBOSIndexOnExecutionTF; fvgSearchIndex--)
                     {
-                        // Ensure we have enough bars for FVG (N, N+1, N+2 pattern means fvgSearchIndex must be at least index 1 for N-1)
-                        if (fvgSearchIndex < 1 || fvgSearchIndex + 1 >= contextBars.Count) continue;
+                        // Ensure we have enough bars for FVG (N, N+1, N+2 pattern means fvgSearchIndex (N+1 bar) must be at least index 1 for N-1)
+                        // So, N-1 index is fvgSearchIndex - 1. N+1 index is fvgSearchIndex. N+2 index is fvgSearchIndex + 1
+                        // This means index for N-1 (first bar of pattern) is fvgSearchIndex -1.
+                        // Index for N+1 (middle bar) is fvgSearchIndex.
+                        // Index for N+2 (last bar of pattern) is fvgSearchIndex + 1.
+                        // The FVG is between bar (fvgSearchIndex-1) and bar (fvgSearchIndex+1)
+                        // The 'series' passed to FindBullish/BearishFVG expects the index of the N+1 bar.
+                        if (fvgSearchIndex < 1 || fvgSearchIndex + 1 >= executionBars.Count) continue;
 
                         double fvgLowBoundary, fvgHighBoundary;
                         bool fvgFound = false;
 
                         if (_lastSweepType == SweepType.HighSwept) // Bearish BOS, look for Bearish FVG
                         {
-                            if (FindBearishFVG(fvgSearchIndex, contextBars, out fvgLowBoundary, out fvgHighBoundary))
+                            // Pass fvgSearchIndex (which is N+1 bar) to FindBearishFVG
+                            if (FindBearishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
                             {
-                                Print($"Bearish FVG found on bar {GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
+                                Print($"Bearish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
                                 _lastFvgDetermined_Low = fvgLowBoundary;
                                 _lastFvgDetermined_High = fvgHighBoundary;
-                                _fvgBarN_High = contextBars.HighPrices[fvgSearchIndex-1]; 
-                                _fvgBarN_Low = contextBars.LowPrices[fvgSearchIndex-1];
-                                _fvgBarN_OpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex - 1]);
-                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex + 1]);
-                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low);                                
+                                // Store details of the N (fvgSearchIndex-1) and N+2 (fvgSearchIndex+1) bars of the FVG pattern on Execution TF
+                                _fvgBarN_High = executionBars.HighPrices[fvgSearchIndex-1]; 
+                                _fvgBarN_Low = executionBars.LowPrices[fvgSearchIndex-1];
+                                _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
+                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
+                                // Drawing FVG rectangle - using execution TF bar times.
+                                // The GetTimeFrameTimeSpan used by DrawFvgRectangle should ideally be for _executionTimeFrame
+                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);                                
                                 PrepareAndPlaceFVGEntryOrder(SweepType.HighSwept); 
                                 fvgFound = true;
                             }
                         }
                         else // Bullish BOS, look for Bullish FVG
                         {
-                            if (FindBullishFVG(fvgSearchIndex, contextBars, out fvgLowBoundary, out fvgHighBoundary))
+                            if (FindBullishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
                             {
-                                Print($"Bullish FVG found on bar {GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
+                                Print($"Bullish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
                                 _lastFvgDetermined_Low = fvgLowBoundary;
                                 _lastFvgDetermined_High = fvgHighBoundary;
-                                _fvgBarN_Low = contextBars.LowPrices[fvgSearchIndex-1]; 
-                                _fvgBarN_High = contextBars.HighPrices[fvgSearchIndex-1];
-                                _fvgBarN_OpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex - 1]);
-                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex + 1]);
-                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low);
+                                _fvgBarN_Low = executionBars.LowPrices[fvgSearchIndex-1]; 
+                                _fvgBarN_High = executionBars.HighPrices[fvgSearchIndex-1];
+                                _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
+                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
+                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);
                                 PrepareAndPlaceFVGEntryOrder(SweepType.LowSwept); 
                                 fvgFound = true;
                             }
@@ -578,38 +633,41 @@ namespace cAlgo.Robots
 
                         if (fvgFound)
                         {
-                            // Keep BOS and FVG drawings until next daily reset or specific clear action
-                            // Only reset flags that control new trade entries for this cycle
-                            _bosLevel = 0; // Reset BOS level to indicate it has been processed
-                            // _relevantSwingLevelForBOS should also be reset to prevent re-triggering CheckForBOS logic without new sweep
+                            _bosLevel = 0; 
                             _relevantSwingLevelForBOS = 0;
-                            //_lastSweepType = SweepType.None; // This might be too early, an order is pending.
-                                                        // Let DailyReset or order resolution handle full reset or if order fails.
                             return; 
                         }
                     }
-                    // If loop completes and no FVG found in the range
-                    Print($"BOS confirmed at {_bosTimeNY:yyyy-MM-dd HH:mm} NY, but NO FVG found in range from sweep bar to BOS bar. Resetting.");
+                    Print($"BOS confirmed on {_executionTimeFrame} at {_bosTimeNY:yyyy-MM-dd HH:mm} NY, but NO FVG found in range from M15 sweep bar to BOS bar on {_executionTimeFrame}. Resetting.");
                     _lastSweepType = SweepType.None; 
                     _relevantSwingLevelForBOS = 0;
                     _sweepBarOpenTimeNY = DateTime.MinValue;
                     _sweepBarActualHighOnContextTF = 0;
                     _sweepBarActualLowOnContextTF = 0;
-                    ClearBosAndFvgDrawings(); // Clear drawings if BOS but no FVG
-                    return; // Reset and wait for new setup
+                    ClearBosAndFvgDrawings();
+                    return;
                 }
             }
             
-            // Optional: Timeout for BOS if too many bars pass after sweep without BOS
-            if (contextBars.Count - 1 > firstBarToCheckForBOSIndex + 15 && firstBarToCheckForBOSIndex >=0) // e.g., wait 15 M15 bars for BOS
+            // Timeout for BOS detection on execution timeframe
+            // If M15 sweep bar was X minutes ago, and execution TF is M3, then X/3 bars.
+            // Original was: 15 M15 bars = 15 * 15 = 225 minutes.
+            // For M3, this would be 225 / 3 = 75 bars.
+            // For M1, this would be 225 bars.
+            int executionTimeFrameMinutes = GetTimeFrameInMinutes(_executionTimeFrame);
+            if (executionTimeFrameMinutes == 0) executionTimeFrameMinutes = 3; // safety for division
+            int bosTimeoutBars = (15 * GetTimeFrameInMinutes(_contextTimeFrame)) / executionTimeFrameMinutes;
+
+
+            if (executionBars.Count -1 > firstBarToCheckForBOSIndexOnExecutionTF + bosTimeoutBars && firstBarToCheckForBOSIndexOnExecutionTF >=0) 
             {
-                Print($"No BOS detected within ~{15 * GetTimeFrameInMinutes(_contextTimeFrame)} mins of sweep. Resetting sweep state for {_lastSweepType}. Sweep bar was {_sweepBarOpenTimeNY:HH:mm}");
+                Print($"No BOS detected on {_executionTimeFrame} within approx. {15 * GetTimeFrameInMinutes(_contextTimeFrame)} mins of M15 sweep. Resetting sweep state for {_lastSweepType}. M15 Sweep bar was {_sweepBarOpenTimeNY:HH:mm}");
                 _lastSweepType = SweepType.None;
                 _relevantSwingLevelForBOS = 0;
                 _sweepBarOpenTimeNY = DateTime.MinValue;
                 _sweepBarActualHighOnContextTF = 0;
                 _sweepBarActualLowOnContextTF = 0;
-                ClearBosAndFvgDrawings(); // Clear drawings on BOS timeout
+                ClearBosAndFvgDrawings(); 
             }
         }
 
@@ -701,6 +759,31 @@ namespace cAlgo.Robots
 
         private void PrepareAndPlaceFVGEntryOrder(SweepType bosDirection) // Removed fvgMiddleBarIndex and contextBars as FVG details are now global
         {
+            // Check daily trading limits before proceeding
+            if (_tradesTakenToday >= 3)
+            {
+                Print("Daily trade limit (3) reached. No more trades today.");
+                _lastSweepType = SweepType.None;
+                _relevantSwingLevelForBOS = 0;
+                _sweepBarOpenTimeNY = DateTime.MinValue;
+                _sweepBarActualHighOnContextTF = 0;
+                _sweepBarActualLowOnContextTF = 0;
+                ClearBosAndFvgDrawings();
+                return;
+            }
+
+            if (_dailyProfitTargetMet)
+            {
+                Print("Daily profit target (>=1%) met. No more trades today.");
+                _lastSweepType = SweepType.None;
+                _relevantSwingLevelForBOS = 0;
+                _sweepBarOpenTimeNY = DateTime.MinValue;
+                _sweepBarActualHighOnContextTF = 0;
+                _sweepBarActualLowOnContextTF = 0;
+                ClearBosAndFvgDrawings();
+                return;
+            }
+
             if (_sweepBarActualHighOnContextTF == 0 || _sweepBarActualLowOnContextTF == 0)
             {
                 Print("Error: Sweep bar High/Low for SL not set. Order not placed.");
@@ -837,6 +920,8 @@ namespace cAlgo.Robots
         private void OnPositionOpened(PositionOpenedEventArgs args)
         { 
             Print($"Position {args.Position.Id} opened (Symbol: {args.Position.SymbolName}, Type: {args.Position.TradeType}, Volume: {args.Position.VolumeInUnits}, Entry: {args.Position.EntryPrice}, SL: {args.Position.StopLoss}, TP: {args.Position.TakeProfit}).");
+            _tradesTakenToday++;
+            Print($"Trade count for today: {_tradesTakenToday}.");
         }
 
         private void OnPositionClosed(PositionClosedEventArgs args)
@@ -870,36 +955,73 @@ namespace cAlgo.Robots
                 pipsLostOrGained = (position.EntryPrice - closingPrice) / Symbol.PipSize;
             }
             Print($"Position {position.Id} closed. {entryExit}. Pips: {pipsLostOrGained:F1}. {PnLStatement}. Reason: {args.Reason}");
+
+            // Check for daily profit target only if it hasn't been met yet and the trade was profitable
+            if (!_dailyProfitTargetMet && position.GrossProfit > 0)
+            {
+                double profitOfThisTradePercentage = (position.GrossProfit / Account.Balance) * 100;
+                Print($"Profit from closed position {position.Id}: {position.GrossProfit} ({profitOfThisTradePercentage:F2}% of current balance).");
+
+                // Using 1.0 as the threshold for >=1% profit
+                if (profitOfThisTradePercentage >= 1.0) 
+                {
+                    _dailyProfitTargetMet = true;
+                    Print($"Daily profit target of >=1% met with this trade ({profitOfThisTradePercentage:F2}%). No more trades will be opened today.");
+
+                    // If a pending order exists, cancel it as the daily profit target is met
+                    if (!string.IsNullOrEmpty(_currentPendingOrderLabel))
+                    {
+                        var pendingOrderToCancel = PendingOrders.FirstOrDefault(o => o.Label == _currentPendingOrderLabel);
+                        if (pendingOrderToCancel != null)
+                        {
+                            CancelPendingOrderAsync(pendingOrderToCancel, (cancelResult) => 
+                            {
+                                if(cancelResult.IsSuccessful) Print($"Pending order {pendingOrderToCancel.Label} cancelled as daily profit target met.");
+                                else Print($"Failed to cancel pending order {pendingOrderToCancel.Label} after profit target met: {cancelResult.Error}");
+                            });
+                            _currentPendingOrderLabel = null; 
+                            ClearPendingOrderLines(); // Clear its drawings
+                        }
+                    }
+                }
+            }
         }
 
         // Helper method to get TimeFrame duration in minutes
         private int GetTimeFrameInMinutes(TimeFrame timeFrame)
         {
             if (timeFrame == TimeFrame.Minute) return 1;
+            if (timeFrame == TimeFrame.Minute2) return 2;
+            if (timeFrame == TimeFrame.Minute3) return 3;
+            if (timeFrame == TimeFrame.Minute4) return 4;
             if (timeFrame == TimeFrame.Minute5) return 5;
+            if (timeFrame == TimeFrame.Minute10) return 10;
             if (timeFrame == TimeFrame.Minute15) return 15;
             if (timeFrame == TimeFrame.Minute30) return 30;
             if (timeFrame == TimeFrame.Hour) return 60;
             if (timeFrame == TimeFrame.Hour4) return 240;
             if (timeFrame == TimeFrame.Daily) return 1440;
             
-            // Fallback for unhandled timeframes - you might want to log or throw an error
-            Print($"Warning: GetTimeFrameInMinutes does not have a specific case for {timeFrame}. Defaulting to 15 minutes.");
-            return 15; 
+            Print($"Warning: GetTimeFrameInMinutes does not have a specific case for {timeFrame}. Defaulting to 1 minute as a fallback.");
+            return 1; // Defaulting to 1 minute as a safer fallback than 15.
         }
 
         // --- Chart Drawing Methods ---
         private TimeSpan GetTimeFrameTimeSpan(TimeFrame timeFrame)
         {
             if (timeFrame == TimeFrame.Minute) return TimeSpan.FromMinutes(1);
+            if (timeFrame == TimeFrame.Minute2) return TimeSpan.FromMinutes(2);
+            if (timeFrame == TimeFrame.Minute3) return TimeSpan.FromMinutes(3);
+            if (timeFrame == TimeFrame.Minute4) return TimeSpan.FromMinutes(4);
             if (timeFrame == TimeFrame.Minute5) return TimeSpan.FromMinutes(5);
+            if (timeFrame == TimeFrame.Minute10) return TimeSpan.FromMinutes(10);
             if (timeFrame == TimeFrame.Minute15) return TimeSpan.FromMinutes(15);
             if (timeFrame == TimeFrame.Minute30) return TimeSpan.FromMinutes(30);
             if (timeFrame == TimeFrame.Hour) return TimeSpan.FromHours(1);
             if (timeFrame == TimeFrame.Hour4) return TimeSpan.FromHours(4);
             if (timeFrame == TimeFrame.Daily) return TimeSpan.FromDays(1);
-            Print($"Warning: GetTimeFrameTimeSpan does not have a specific case for {timeFrame}. Defaulting to 15 minutes.");
-            return TimeSpan.FromMinutes(15);
+            Print($"Warning: GetTimeFrameTimeSpan does not have a specific case for {timeFrame}. Defaulting to 1 minute as a fallback.");
+            return TimeSpan.FromMinutes(1); // Defaulting to 1 minute as a safer fallback.
         }
 
         private void DrawLiquidityLevels(double high, double low)
@@ -916,27 +1038,29 @@ namespace cAlgo.Robots
             if (level != 0) Chart.DrawHorizontalLine(BosSwingLineName, level, Color.Orange, 2, LineStyle.Dots);
         }
 
-        private void DrawFvgRectangle(DateTime startTimeNY, double topPrice, DateTime endTimeNY, double bottomPrice)
+        private void DrawFvgRectangle(DateTime startTimeNY, double topPrice, DateTime endTimeNY, double bottomPrice, TimeFrame frameForDuration)
         {
             Chart.RemoveObject(FvgRectName);
-            // Ensure endTimeNY is after startTimeNY for rectangle drawing
+            TimeSpan barDuration = GetTimeFrameTimeSpan(frameForDuration);
+
             DateTime actualEndTimeNY = endTimeNY;
             if (endTimeNY <= startTimeNY)
             {
-                actualEndTimeNY = startTimeNY.Add(_contextTimeFrameTimeSpan); // Make it last for one bar if times are problematic
+                actualEndTimeNY = startTimeNY.Add(barDuration); 
             }
 
-            // Convert NY times to Server time for Chart.DrawRectangle
             DateTime startTimeServer = TimeZoneInfo.ConvertTime(startTimeNY, _newYorkTimeZone, TimeZone);
             DateTime endTimeServer = TimeZoneInfo.ConvertTime(actualEndTimeNY, _newYorkTimeZone, TimeZone);
 
-            // Ensure topPrice is actually above bottomPrice
             double rectTop = Math.Max(topPrice, bottomPrice);
             double rectBottom = Math.Min(topPrice, bottomPrice);
 
             if (topPrice != 0 && bottomPrice != 0)
             {
-                var rect = Chart.DrawRectangle(FvgRectName, startTimeServer, rectTop, endTimeServer.Add(_contextTimeFrameTimeSpan), rectBottom, Color.FromArgb(80, Color.Gray.R, Color.Gray.G, Color.Gray.B));
+                // For FVG, the rectangle width should represent the duration of the FVG pattern (typically 3 bars of the given timeframe)
+                // If startTimeNY is N-bar open and endTimeNY is N+2 bar open, we need N+2 bar close for full rect.
+                // Let's make it span from N-1 open to N+2 open + N+2 duration
+                var rect = Chart.DrawRectangle(FvgRectName, startTimeServer, rectTop, endTimeServer.Add(barDuration), rectBottom, Color.FromArgb(80, Color.Gray.R, Color.Gray.G, Color.Gray.B));
                 rect.IsFilled = true;
             }
         }

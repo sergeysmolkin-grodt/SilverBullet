@@ -35,9 +35,12 @@ namespace cAlgo.Robots
         private const string PendingTpLineName = "SB_PendingTpLine";
         private const string M3BosConfirmationLineName = "SB_M3_BOS_Confirmation_Line";
 
-        // M3 Sweep Visualization Prefixes
-        private const string M3SweepHighVizPrefix = "M3SweepViz_High_";
-        private const string M3SweepLowVizPrefix = "M3SweepViz_Low_";
+        // Strategy Constants
+        private const double RiskPercentage = 1.0;
+        private const double RiskRewardRatio = 1.5;
+        private const string ContextTimeFrameString = "m15";
+        private const string ExecutionTimeFrameString = "m3";
+        private const string ContextTimeFrameForTrendString = "m15";
 
         // Daily Trading Limits
         private int _tradesTakenToday = 0;
@@ -46,34 +49,13 @@ namespace cAlgo.Robots
         [Parameter("Minutes Before Session for Liquidity", DefaultValue = 10, MinValue = 1, Group = "Session Timing")]
         public int MinutesBeforeSessionForLiquidity { get; set; }
 
-        [Parameter("Risk Percentage", DefaultValue = 1.0, MinValue = 0.1, MaxValue = 5.0, Group = "Risk Management")]
-        public double RiskPercentage { get; set; }
-
-        [Parameter("Risk Reward Ratio", DefaultValue = 1.5, MinValue = 0.1, Group = "Risk Management")]
-        public double RiskRewardRatio { get; set; }
-
-        [Parameter("Context TimeFrame", DefaultValue = "m15", Group = "TimeFrames")]
-        public string ContextTimeFrameString { get; set; }
-
-        [Parameter("Execution TimeFrame", DefaultValue = "m3", Group = "TimeFrames")]
-        public string ExecutionTimeFrameString { get; set; }
-
         [Parameter("Swing Lookback Period", DefaultValue = 20, MinValue = 3, Group = "Strategy Parameters")]
         public int SwingLookbackPeriod { get; set; }
 
         [Parameter("Swing Candles", DefaultValue = 1, MinValue = 1, MaxValue = 3, Group = "Strategy Parameters")]
         public int SwingCandles { get; set; }
 
-        [Parameter("M3 Viz Lookback (Bars)", DefaultValue = 20, Group = "Visualization")]
-        public int M3SwingLookbackForViz { get; set; }
-
-        [Parameter("M3 Viz Sweep Forward (Bars)", DefaultValue = 5, Group = "Visualization")]
-        public int M3SweepForwardLookForViz { get; set; }
-
         // Context Parameters
-        [Parameter("Trend Context TF", DefaultValue = "m15", Group = "Context")]
-        public string ContextTimeFrameForTrendString { get; set; }
-
         [Parameter("Trend Lookback Candles", DefaultValue = 30, MinValue = 5, Group = "Context")]
         public int ContextLookbackCandles { get; set; }
 
@@ -193,7 +175,6 @@ namespace cAlgo.Robots
             Print($"Context TimeFrame: {_contextTimeFrame}");
             Print($"Execution TimeFrame: {_executionTimeFrame}");
             Print($"Swing Lookback: {SwingLookbackPeriod} bars, Swing Candles: {SwingCandles}");
-            Print($"M3 Viz Lookback: {M3SwingLookbackForViz} bars, M3 Viz Sweep Forward: {M3SweepForwardLookForViz}");
 
             PendingOrders.Filled += OnPendingOrderFilled;
             PendingOrders.Cancelled += OnPendingOrderCancelled;
@@ -211,7 +192,7 @@ namespace cAlgo.Robots
             UpdateTrendContext(currentTimeNY);
 
             // Visualize M3 sweeps (if enabled and during session)
-            VisualizeM3Sweeps();
+            // VisualizeM3Sweeps();
 
             SessionInfo currentSession = GetCurrentSessionInfo(currentTimeNY);
 
@@ -281,7 +262,6 @@ namespace cAlgo.Robots
             Positions.Closed -= OnPositionClosed;
 
             ClearAllStrategyDrawings();
-            ClearM3SweepVisualizations(); // Clear M3 sweep viz lines on stop
         }
 
         private DateTime GetNewYorkTime(DateTime serverTime)
@@ -326,7 +306,6 @@ namespace cAlgo.Robots
                 // Reset daily limits
                 _tradesTakenToday = 0;
                 _dailyProfitTargetMet = false;
-                ClearM3SweepVisualizations(); // Clear M3 sweep viz lines on daily reset
             }
         }
 
@@ -1168,20 +1147,6 @@ namespace cAlgo.Robots
             ClearLiquidityDrawings();
             ClearBosAndFvgDrawings();
             ClearPendingOrderLines();
-            // Note: M3 Sweep visualizations are cleared separately by ClearM3SweepVisualizations
-        }
-
-        private void ClearM3SweepVisualizations()
-        {
-            // Iterate backwards to safely remove from the collection of chart objects
-            for (int i = Chart.Objects.Count - 1; i >= 0; i--)
-            {
-                var chartObject = Chart.Objects[i];
-                if (chartObject.Name.StartsWith(M3SweepHighVizPrefix) || chartObject.Name.StartsWith(M3SweepLowVizPrefix))
-                {
-                    Chart.RemoveObject(chartObject.Name);
-                }
-            }
         }
 
         private void DrawM3BosConfirmationLine(DateTime bosConfirmationBarTimeNY, SweepType originalSweepDirection)
@@ -1200,77 +1165,6 @@ namespace cAlgo.Robots
                 lineColor = Color.DarkRed;
             }
             Chart.DrawVerticalLine(M3BosConfirmationLineName, serverTime, lineColor, 2, LineStyle.Solid);
-        }
-
-        private void VisualizeM3Sweeps()
-        {
-            var currentTimeNY = GetNewYorkTime(Server.Time);
-            SessionInfo currentSession = GetCurrentSessionInfo(currentTimeNY);
-
-            if (!currentSession.IsActivePeriod)
-            {
-                // Only visualize M3 sweeps during active NY session periods (including pre-buffer)
-                return;
-            }
-
-            var m3Bars = MarketData.GetBars(_executionTimeFrame);
-            if (m3Bars.Count == 0) return;
-
-            // Define the range of bars to check for swings
-            // The swing bar must be old enough to have M3SweepForwardLookForViz bars after it for checking a sweep.
-            int latestPossibleSwingBarIndex = m3Bars.Count - 1 - M3SweepForwardLookForViz;
-            // The earliest bar we'll check for a swing. Go back M3SwingLookbackForViz bars from latestPossibleSwingBarIndex.
-            int earliestBarToConsiderForSwing = Math.Max(SwingCandles, latestPossibleSwingBarIndex - M3SwingLookbackForViz +1); // +1 because lookback is a count
-
-            if (latestPossibleSwingBarIndex < SwingCandles || latestPossibleSwingBarIndex < earliestBarToConsiderForSwing) // Not enough data
-                return;
-
-            for (int swingIndex = latestPossibleSwingBarIndex; swingIndex >= earliestBarToConsiderForSwing; swingIndex--)
-            {
-                // Check for M3 Swing High at swingIndex
-                if (IsSwingHigh(swingIndex, m3Bars, SwingCandles))
-                {
-                    double swingHighLevel = m3Bars.HighPrices[swingIndex];
-                    DateTime swingHighOpenTime = m3Bars.OpenTimes[swingIndex];
-
-                    for (int sweepCheckIndex = swingIndex + 1;
-                         sweepCheckIndex <= swingIndex + M3SweepForwardLookForViz && sweepCheckIndex < m3Bars.Count;
-                         sweepCheckIndex++)
-                    {
-                        if (m3Bars.HighPrices[sweepCheckIndex] > swingHighLevel)
-                        {
-                            DateTime sweepBarOpenTime = m3Bars.OpenTimes[sweepCheckIndex];
-                            DateTime sweepBarEndTime = sweepBarOpenTime.Add(GetTimeFrameTimeSpan(_executionTimeFrame));
-                            string objName = $"{M3SweepHighVizPrefix}{swingHighOpenTime.Ticks}_{sweepBarOpenTime.Ticks}";
-                            
-                            Chart.DrawTrendLine(objName, swingHighOpenTime, swingHighLevel, sweepBarEndTime, swingHighLevel, Color.Cyan, 1, LineStyle.Dots);
-                            break; 
-                        }
-                    }
-                }
-
-                // Check for M3 Swing Low at swingIndex
-                if (IsSwingLow(swingIndex, m3Bars, SwingCandles))
-                {
-                    double swingLowLevel = m3Bars.LowPrices[swingIndex];
-                    DateTime swingLowOpenTime = m3Bars.OpenTimes[swingIndex];
-
-                    for (int sweepCheckIndex = swingIndex + 1;
-                         sweepCheckIndex <= swingIndex + M3SweepForwardLookForViz && sweepCheckIndex < m3Bars.Count;
-                         sweepCheckIndex++)
-                    {
-                        if (m3Bars.LowPrices[sweepCheckIndex] < swingLowLevel)
-                        {
-                            DateTime sweepBarOpenTime = m3Bars.OpenTimes[sweepCheckIndex];
-                            DateTime sweepBarEndTime = sweepBarOpenTime.Add(GetTimeFrameTimeSpan(_executionTimeFrame));
-                            string objName = $"{M3SweepLowVizPrefix}{swingLowOpenTime.Ticks}_{sweepBarOpenTime.Ticks}";
-
-                            Chart.DrawTrendLine(objName, swingLowOpenTime, swingLowLevel, sweepBarEndTime, swingLowLevel, Color.Magenta, 1, LineStyle.Dots);
-                            break;
-                        }
-                    }
-                }
-            }
         }
 
         private void UpdateTrendContext(DateTime currentTimeNY)
@@ -1363,12 +1257,11 @@ namespace cAlgo.Robots
             // M3 Sweep visualization lines are managed by VisualizeM3Sweeps itself (cleared on each run).
         }
 
-        private TimeFrame ParseTimeFrame(string timeFrameString, TimeFrame? defaultTimeFrame = null)
+        private TimeFrame ParseTimeFrame(string timeFrameString)
         {
             if (string.IsNullOrWhiteSpace(timeFrameString))
             {
-                if (defaultTimeFrame.HasValue) return defaultTimeFrame.Value;
-                throw new ArgumentException("TimeFrame string cannot be empty when no default is provided.");
+                throw new ArgumentException("TimeFrame string cannot be empty.");
             }
 
             switch (timeFrameString.ToLowerInvariant())
@@ -1387,11 +1280,6 @@ namespace cAlgo.Robots
                 case "w1": case "weekly": return TimeFrame.Weekly;
                 case "mn1": case "monthly": return TimeFrame.Monthly;
                 default:
-                    if (defaultTimeFrame.HasValue)
-                    {
-                        Print($"Warning: Could not parse TimeFrame string '{timeFrameString}'. Defaulting to {defaultTimeFrame.Value}.");
-                        return defaultTimeFrame.Value;
-                    }
                     throw new ArgumentException($"Could not parse TimeFrame string: {timeFrameString}");
             }
         }

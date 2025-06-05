@@ -10,24 +10,6 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class SilverBulletBot : Robot
     {
-        [Parameter("Session 1 Start (NY)", DefaultValue = "03:00")]
-        public string Session1StartNY { get; set; }
-
-        [Parameter("Session 1 End (NY)", DefaultValue = "04:00")]
-        public string Session1EndNY { get; set; }
-
-        [Parameter("Session 2 Start (NY)", DefaultValue = "10:00")]
-        public string Session2StartNY { get; set; }
-
-        [Parameter("Session 2 End (NY)", DefaultValue = "11:00")]
-        public string Session2EndNY { get; set; }
-
-        [Parameter("Session 3 Start (NY)", DefaultValue = "14:00")]
-        public string Session3StartNY { get; set; }
-
-        [Parameter("Session 3 End (NY)", DefaultValue = "15:00")]
-        public string Session3EndNY { get; set; }
-
         [Parameter("Minutes Before Session for Liquidity", DefaultValue = 10)]
         public int MinutesBeforeSessionForLiquidity { get; set; }
 
@@ -120,7 +102,7 @@ namespace cAlgo.Robots
             }
 
             Print("Silver Bullet Bot Started.");
-            Print($"Trading Sessions (NY Time): {Session1StartNY}-{Session1EndNY}, {Session2StartNY}-{Session2EndNY}, {Session3StartNY}-{Session3EndNY}");
+            Print("Trading Sessions (NY Time): 03:00-04:00, 10:00-11:00, 14:00-15:00");
             Print($"Liquidity lookback: {MinutesBeforeSessionForLiquidity} minutes before session start.");
             Print($"Risk per trade: {RiskPercentage}%, RR: {RiskRewardRatio}");
             Print($"Context TimeFrame: {_contextTimeFrame}");
@@ -233,12 +215,13 @@ namespace cAlgo.Robots
                 Print($"New trading day: {currentTimeNY.Date.ToShortDateString()}. Updating session times and resetting liquidity flags.");
                 _lastDateProcessedForSessionTimes = currentTimeNY.Date;
 
-                _session1ActualStartNY = currentTimeNY.Date + TimeSpan.Parse(Session1StartNY);
-                _session1ActualEndNY = currentTimeNY.Date + TimeSpan.Parse(Session1EndNY);
-                _session2ActualStartNY = currentTimeNY.Date + TimeSpan.Parse(Session2StartNY);
-                _session2ActualEndNY = currentTimeNY.Date + TimeSpan.Parse(Session2EndNY);
-                _session3ActualStartNY = currentTimeNY.Date + TimeSpan.Parse(Session3StartNY);
-                _session3ActualEndNY = currentTimeNY.Date + TimeSpan.Parse(Session3EndNY);
+                // Hardcoded session times
+                _session1ActualStartNY = currentTimeNY.Date + TimeSpan.Parse("03:00");
+                _session1ActualEndNY = currentTimeNY.Date + TimeSpan.Parse("04:00");
+                _session2ActualStartNY = currentTimeNY.Date + TimeSpan.Parse("10:00");
+                _session2ActualEndNY = currentTimeNY.Date + TimeSpan.Parse("11:00");
+                _session3ActualStartNY = currentTimeNY.Date + TimeSpan.Parse("14:00");
+                _session3ActualEndNY = currentTimeNY.Date + TimeSpan.Parse("15:00");
 
                 _liquidityIdentifiedForSession1 = false;
                 _liquidityIdentifiedForSession2 = false;
@@ -624,36 +607,66 @@ namespace cAlgo.Robots
 
         private double CalculateOrderVolume(double stopLossPips)
         {
-            if (stopLossPips <= 0) return 0;
+            Print($"--- Calculating Order Volume ---");
+            Print($"Input StopLossPips: {stopLossPips}");
 
-            double riskAmount = Account.Balance * (RiskPercentage / 100.0);
+            if (stopLossPips <= 0.1) // Increased minimum SL to avoid extreme volumes
+            {
+                Print("Stop loss ({stopLossPips} pips) is too small. Min SL for volume calc: 0.1 pips. Volume set to 0.");
+                return 0;
+            }
+
+            double balance = Account.Balance;
+            double riskPercent = RiskPercentage / 100.0;
+            double riskAmount = balance * riskPercent;
+            Print($"Account Balance: {balance}, RiskPercentage: {RiskPercentage}%, RiskAmount: {riskAmount}");
+
             double pipValue = Symbol.PipValue;
+            Print($"Symbol.PipValue: {pipValue}");
             if (pipValue == 0) 
-            { 
-                Print("Error: Symbol.PipValue is zero. Cannot calculate volume.");
+            {
+                Print("Error: Symbol.PipValue is zero. Cannot calculate volume. Volume set to 0.");
                 return 0; 
             }
             
-            // Quantity in base currency units
-            double quantity = riskAmount / (stopLossPips * pipValue);
-            
-            // Convert quantity to volume in lots
-            double volumeInLots = Symbol.QuantityToVolumeInUnits(quantity);
+            // This is the total value of position movement for 1 pip in deposit currency
+            // Amount of quote currency to risk per pip
+            double amountToRiskPerPip = riskAmount / stopLossPips;
+            Print($"AmountToRiskPerPip (Quote Currency): {amountToRiskPerPip}");
 
-            // Normalize the volume to the symbol's lot step
-            volumeInLots = Symbol.NormalizeVolumeInUnits(volumeInLots, RoundingMode.Down);
+            // Convert this to volume in units of the symbol
+            // For FX: 1 lot = 100,000 units of base currency. Volume is expressed in base currency units.
+            // Symbol.VolumeToQuantity() and Symbol.QuantityToVolume() might be more direct.
+            // Let's stick to the direct formula: VolumeInLots = (RiskInAccountCurrency / (StopLossInPips * PipValueInAccountCurrencyPerLot)) 
+            // PipValue is ALREADY per lot typically, so: VolumeInLots = RiskAmount / (SL_pips * PipValue)
             
-            if (volumeInLots < Symbol.VolumeInUnitsMin)
+            double volumeInLotsCalc = riskAmount / (stopLossPips * pipValue); 
+            Print($"Calculated Volume (in Lots, direct formula): {volumeInLotsCalc}");
+
+            // The cTrader API usually expects volume in units that Symbol.NormalizeVolumeInUnits understands.
+            // For FX, this is typically standard lots (e.g., 1.0, 0.1, 0.01).
+            // Let's ensure the units are consistent.
+            // `Symbol.LotSize` gives the contract size for one standard lot.
+            // `pipValue` is usually the value of a pip for 1 lot.
+
+            // So, volumeInLotsCalc should directly be the volume in lots.
+            double normalizedVolume = Symbol.NormalizeVolumeInUnits(volumeInLotsCalc, RoundingMode.Down);
+            Print($"Normalized Volume (Lots): {normalizedVolume}");
+            Print($"Symbol MinVolume: {Symbol.VolumeInUnitsMin}, MaxVolume: {Symbol.VolumeInUnitsMax}, LotStep: {Symbol.VolumeStep}");
+
+            if (normalizedVolume < Symbol.VolumeInUnitsMin)
             {
-                Print($"Calculated volume {volumeInLots} is less than minimum {Symbol.VolumeInUnitsMin}. No trade placed.");
+                Print($"Calculated volume {normalizedVolume} is less than minimum {Symbol.VolumeInUnitsMin}. Volume set to 0.");
                 return 0;
             }
-            if (volumeInLots > Symbol.VolumeInUnitsMax && Symbol.VolumeInUnitsMax > 0)
+            if (Symbol.VolumeInUnitsMax > 0 && normalizedVolume > Symbol.VolumeInUnitsMax) // Check if MaxVolume is defined
             {
-                Print($"Calculated volume {volumeInLots} is greater than maximum {Symbol.VolumeInUnitsMax}. Using max volume.");
+                Print($"Calculated volume {normalizedVolume} is greater than maximum {Symbol.VolumeInUnitsMax}. Using max volume: {Symbol.VolumeInUnitsMax}.");
                 return Symbol.VolumeInUnitsMax;
             }
-            return volumeInLots;
+            
+            Print($"--- Final Calculated Volume (Lots): {normalizedVolume} ---");
+            return normalizedVolume;
         }
 
         private void PrepareAndPlaceFVGEntryOrder(SweepType bosDirection, int fvgMiddleBarIndex, Bars contextBars)

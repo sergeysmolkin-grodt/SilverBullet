@@ -10,6 +10,15 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class SilverBulletBot : Robot
     {
+        // Chart Object Names
+        private const string LiqHighLineName = "SB_LiquidityHighLine";
+        private const string LiqLowLineName = "SB_LiquidityLowLine";
+        private const string BosSwingLineName = "SB_BOS_SwingLevelLine";
+        private const string FvgRectName = "SB_FVG_Rectangle";
+        private const string PendingEntryLineName = "SB_PendingEntryLine";
+        private const string PendingSlLineName = "SB_PendingSlLine";
+        private const string PendingTpLineName = "SB_PendingTpLine";
+
         [Parameter("Minutes Before Session for Liquidity", DefaultValue = 10)]
         public int MinutesBeforeSessionForLiquidity { get; set; }
 
@@ -64,6 +73,9 @@ namespace cAlgo.Robots
         private double _lastFvgDetermined_High;   // Stores High of the identified FVG range for entry
         private double _fvgBarN_Low;              // Stores Low of the N bar (first bar of FVG pattern) of the found FVG
         private double _fvgBarN_High;             // Stores High of the N bar (first bar of FVG pattern) of the found FVG
+        private DateTime _fvgBarN_OpenTimeNY;     // Open time of N bar for FVG
+        private DateTime _fvgBarN2_OpenTimeNY;    // Open time of N+2 bar for FVG
+        private TimeSpan _contextTimeFrameTimeSpan; // To help with FVG rect drawing duration
 
         private struct SessionInfo
         {
@@ -101,9 +113,10 @@ namespace cAlgo.Robots
             }
             catch (ArgumentException)
             {
-                Print($"Error parsing ContextTimeFrameString: \'{ContextTimeFrameString}\'. Defaulting to m15.");
+                Print($"Error parsing ContextTimeFrameString: '{ContextTimeFrameString}'. Defaulting to m15.");
                 _contextTimeFrame = TimeFrame.Minute15;
             }
+            _contextTimeFrameTimeSpan = GetTimeFrameTimeSpan(_contextTimeFrame); // Initialize TimeSpan for context timeframe
 
             Print("Silver Bullet Bot Started.");
             Print("Trading Sessions (NY Time): 03:00-04:00, 10:00-11:00, 14:00-15:00");
@@ -116,6 +129,8 @@ namespace cAlgo.Robots
             PendingOrders.Cancelled += OnPendingOrderCancelled;
             Positions.Opened += OnPositionOpened;
             Positions.Closed += OnPositionClosed;
+
+            ClearAllStrategyDrawings(); // Clear any lingering drawings from a previous run
         }
 
         protected override void OnTick()
@@ -192,6 +207,8 @@ namespace cAlgo.Robots
             PendingOrders.Cancelled -= OnPendingOrderCancelled;
             Positions.Opened -= OnPositionOpened;
             Positions.Closed -= OnPositionClosed;
+
+            ClearAllStrategyDrawings();
         }
 
         private DateTime GetNewYorkTime(DateTime serverTime)
@@ -213,6 +230,7 @@ namespace cAlgo.Robots
             {
                 Print($"New trading day: {currentTimeNY.Date.ToShortDateString()}. Updating session times and resetting liquidity flags.");
                 _lastDateProcessedForSessionTimes = currentTimeNY.Date;
+                ClearAllStrategyDrawings(); // Clear drawings for the new day
 
                 _session1ActualStartNY = currentTimeNY.Date + TimeSpan.Parse("03:00");
                 _session1ActualEndNY = currentTimeNY.Date + TimeSpan.Parse("04:00");
@@ -308,6 +326,7 @@ namespace cAlgo.Robots
                 
                 SetLiquidityIdentifiedFlag(sessionNumber, true);
                 Print($"Session {sessionNumber} ({sessionActualStartNY:HH:mm} NY): Liquidity identified from bar {_currentLiquiditySourceBarTimeNY:yyyy-MM-dd HH:mm} NY. High: {Math.Round(_currentLiquidityHigh, Symbol.Digits)}, Low: {Math.Round(_currentLiquidityLow, Symbol.Digits)}");
+                DrawLiquidityLevels(_currentLiquidityHigh, _currentLiquidityLow);
             }
             else
             {
@@ -439,6 +458,7 @@ namespace cAlgo.Robots
                         _relevantSwingLevelForBOS = contextBars.LowPrices[i];
                         _relevantSwingBarTimeNY = GetNewYorkTime(contextBars.OpenTimes[i]);
                         Print($"Relevant Swing Low for BOS identified at {_relevantSwingLevelForBOS} (Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after High Sweep.");
+                        DrawBosLevel(_relevantSwingLevelForBOS);
                         return;
                     }
                 }
@@ -453,6 +473,7 @@ namespace cAlgo.Robots
                         _relevantSwingLevelForBOS = contextBars.HighPrices[i];
                         _relevantSwingBarTimeNY = GetNewYorkTime(contextBars.OpenTimes[i]);
                         Print($"Relevant Swing High for BOS identified at {_relevantSwingLevelForBOS} (Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after Low Sweep.");
+                        DrawBosLevel(_relevantSwingLevelForBOS);
                         return;
                     }
                 }
@@ -465,6 +486,7 @@ namespace cAlgo.Robots
                 _sweepBarOpenTimeNY = DateTime.MinValue;
                 _sweepBarActualHighOnContextTF = 0;
                 _sweepBarActualLowOnContextTF = 0;
+                ClearBosAndFvgDrawings(); // Clear drawings if BOS but no FVG
             }
         }
 
@@ -529,8 +551,11 @@ namespace cAlgo.Robots
                                 _lastFvgDetermined_Low = fvgLowBoundary;
                                 _lastFvgDetermined_High = fvgHighBoundary;
                                 _fvgBarN_High = contextBars.HighPrices[fvgSearchIndex-1]; 
-                                _fvgBarN_Low = contextBars.LowPrices[fvgSearchIndex-1]; 
-                                PrepareAndPlaceFVGEntryOrder(SweepType.HighSwept); // Pass only direction
+                                _fvgBarN_Low = contextBars.LowPrices[fvgSearchIndex-1];
+                                _fvgBarN_OpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex - 1]);
+                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex + 1]);
+                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low);                                
+                                PrepareAndPlaceFVGEntryOrder(SweepType.HighSwept); 
                                 fvgFound = true;
                             }
                         }
@@ -543,18 +568,23 @@ namespace cAlgo.Robots
                                 _lastFvgDetermined_High = fvgHighBoundary;
                                 _fvgBarN_Low = contextBars.LowPrices[fvgSearchIndex-1]; 
                                 _fvgBarN_High = contextBars.HighPrices[fvgSearchIndex-1];
-                                PrepareAndPlaceFVGEntryOrder(SweepType.LowSwept); // Pass only direction
+                                _fvgBarN_OpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex - 1]);
+                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(contextBars.OpenTimes[fvgSearchIndex + 1]);
+                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low);
+                                PrepareAndPlaceFVGEntryOrder(SweepType.LowSwept); 
                                 fvgFound = true;
                             }
                         }
 
                         if (fvgFound)
                         {
-                            _lastSweepType = SweepType.None; 
+                            // Keep BOS and FVG drawings until next daily reset or specific clear action
+                            // Only reset flags that control new trade entries for this cycle
+                            _bosLevel = 0; // Reset BOS level to indicate it has been processed
+                            // _relevantSwingLevelForBOS should also be reset to prevent re-triggering CheckForBOS logic without new sweep
                             _relevantSwingLevelForBOS = 0;
-                            _sweepBarOpenTimeNY = DateTime.MinValue;
-                            _sweepBarActualHighOnContextTF = 0;
-                            _sweepBarActualLowOnContextTF = 0;
+                            //_lastSweepType = SweepType.None; // This might be too early, an order is pending.
+                                                        // Let DailyReset or order resolution handle full reset or if order fails.
                             return; 
                         }
                     }
@@ -565,6 +595,7 @@ namespace cAlgo.Robots
                     _sweepBarOpenTimeNY = DateTime.MinValue;
                     _sweepBarActualHighOnContextTF = 0;
                     _sweepBarActualLowOnContextTF = 0;
+                    ClearBosAndFvgDrawings(); // Clear drawings if BOS but no FVG
                     return; // Reset and wait for new setup
                 }
             }
@@ -578,6 +609,7 @@ namespace cAlgo.Robots
                 _sweepBarOpenTimeNY = DateTime.MinValue;
                 _sweepBarActualHighOnContextTF = 0;
                 _sweepBarActualLowOnContextTF = 0;
+                ClearBosAndFvgDrawings(); // Clear drawings on BOS timeout
             }
         }
 
@@ -756,8 +788,25 @@ namespace cAlgo.Robots
             Print($"Preparing to place {tradeType} Limit Order: Label={newOrderLabel}, Vol={volume}, Entry={Math.Round(entryPrice, Symbol.Digits)}, SL={Math.Round(stopLossPrice, Symbol.Digits)} ({stopLossInPips} pips), TP={Math.Round(takeProfitPrice, Symbol.Digits)}");
 
             // Explicitly cast the 8th argument (null) to ProtectionType? to resolve ambiguity
-            var result = PlaceLimitOrderAsync(tradeType, SymbolName, volume, entryPrice, newOrderLabel, stopLossPrice, takeProfitPrice, (ProtectionType?)null, null);
-            _currentPendingOrderLabel = newOrderLabel; 
+            PlaceLimitOrderAsync(tradeType, SymbolName, volume, entryPrice, newOrderLabel, stopLossPrice, takeProfitPrice, (ProtectionType?)null, tradeResult =>
+            {
+                if (tradeResult.IsSuccessful)
+                {
+                    Print($"Successfully placed pending order {newOrderLabel}. Position ID (if filled immediately): {tradeResult.Position?.Id}, Pending Order ID: {tradeResult.PendingOrder?.Id}");
+                    DrawPendingOrderLines(entryPrice, stopLossPrice, takeProfitPrice);
+                    _currentPendingOrderLabel = newOrderLabel;
+                }
+                else
+                {
+                    Print($"Failed to place pending order {newOrderLabel}: {tradeResult.Error}. Clearing related drawings.");
+                    ClearBosAndFvgDrawings(); // Also clear FVG if order placement failed
+                    _lastSweepType = SweepType.None;
+                    _relevantSwingLevelForBOS = 0;
+                    _sweepBarOpenTimeNY = DateTime.MinValue;
+                    _sweepBarActualHighOnContextTF = 0;
+                    _sweepBarActualLowOnContextTF = 0;
+                }
+            });
         }
 
         private void OnPendingOrderFilled(PendingOrderFilledEventArgs args)
@@ -766,6 +815,8 @@ namespace cAlgo.Robots
             if (args.PendingOrder.Label == _currentPendingOrderLabel)
             {
                 _currentPendingOrderLabel = null; 
+                ClearPendingOrderLines();
+                // FVG and BOS drawings remain until daily reset or next setup
             }
         }
 
@@ -775,6 +826,11 @@ namespace cAlgo.Robots
             if (args.PendingOrder.Label == _currentPendingOrderLabel)
             {
                 _currentPendingOrderLabel = null;
+                ClearPendingOrderLines();
+                ClearBosAndFvgDrawings(); // If order cancelled, assume setup is invalid
+                _lastSweepType = SweepType.None; // Reset state to allow new sweep detection
+                _relevantSwingLevelForBOS = 0;
+                _sweepBarOpenTimeNY = DateTime.MinValue;
             }
         }
 
@@ -830,6 +886,93 @@ namespace cAlgo.Robots
             // Fallback for unhandled timeframes - you might want to log or throw an error
             Print($"Warning: GetTimeFrameInMinutes does not have a specific case for {timeFrame}. Defaulting to 15 minutes.");
             return 15; 
+        }
+
+        // --- Chart Drawing Methods ---
+        private TimeSpan GetTimeFrameTimeSpan(TimeFrame timeFrame)
+        {
+            if (timeFrame == TimeFrame.Minute) return TimeSpan.FromMinutes(1);
+            if (timeFrame == TimeFrame.Minute5) return TimeSpan.FromMinutes(5);
+            if (timeFrame == TimeFrame.Minute15) return TimeSpan.FromMinutes(15);
+            if (timeFrame == TimeFrame.Minute30) return TimeSpan.FromMinutes(30);
+            if (timeFrame == TimeFrame.Hour) return TimeSpan.FromHours(1);
+            if (timeFrame == TimeFrame.Hour4) return TimeSpan.FromHours(4);
+            if (timeFrame == TimeFrame.Daily) return TimeSpan.FromDays(1);
+            Print($"Warning: GetTimeFrameTimeSpan does not have a specific case for {timeFrame}. Defaulting to 15 minutes.");
+            return TimeSpan.FromMinutes(15);
+        }
+
+        private void DrawLiquidityLevels(double high, double low)
+        {
+            Chart.RemoveObject(LiqHighLineName);
+            Chart.RemoveObject(LiqLowLineName);
+            if (high != 0) Chart.DrawHorizontalLine(LiqHighLineName, high, Color.Blue, 2, LineStyle.Solid);
+            if (low != 0) Chart.DrawHorizontalLine(LiqLowLineName, low, Color.Red, 2, LineStyle.Solid);
+        }
+
+        private void DrawBosLevel(double level)
+        {
+            Chart.RemoveObject(BosSwingLineName);
+            if (level != 0) Chart.DrawHorizontalLine(BosSwingLineName, level, Color.Orange, 2, LineStyle.Dots);
+        }
+
+        private void DrawFvgRectangle(DateTime startTimeNY, double topPrice, DateTime endTimeNY, double bottomPrice)
+        {
+            Chart.RemoveObject(FvgRectName);
+            // Ensure endTimeNY is after startTimeNY for rectangle drawing
+            DateTime actualEndTimeNY = endTimeNY;
+            if (endTimeNY <= startTimeNY)
+            {
+                actualEndTimeNY = startTimeNY.Add(_contextTimeFrameTimeSpan); // Make it last for one bar if times are problematic
+            }
+
+            // Convert NY times to Server time for Chart.DrawRectangle
+            DateTime startTimeServer = TimeZoneInfo.ConvertTime(startTimeNY, _newYorkTimeZone, TimeZone);
+            DateTime endTimeServer = TimeZoneInfo.ConvertTime(actualEndTimeNY, _newYorkTimeZone, TimeZone);
+
+            // Ensure topPrice is actually above bottomPrice
+            double rectTop = Math.Max(topPrice, bottomPrice);
+            double rectBottom = Math.Min(topPrice, bottomPrice);
+
+            if (topPrice != 0 && bottomPrice != 0)
+            {
+                var rect = Chart.DrawRectangle(FvgRectName, startTimeServer, rectTop, endTimeServer.Add(_contextTimeFrameTimeSpan), rectBottom, Color.FromArgb(80, Color.Gray.R, Color.Gray.G, Color.Gray.B));
+                rect.IsFilled = true;
+            }
+        }
+
+        private void DrawPendingOrderLines(double entry, double sl, double tp)
+        {
+            ClearPendingOrderLines();
+            if (entry != 0) Chart.DrawHorizontalLine(PendingEntryLineName, entry, Color.Green, 2, LineStyle.Dots);
+            if (sl != 0) Chart.DrawHorizontalLine(PendingSlLineName, sl, Color.Red, 2, LineStyle.Dots);
+            if (tp != 0) Chart.DrawHorizontalLine(PendingTpLineName, tp, Color.DodgerBlue, 2, LineStyle.Dots);
+        }
+
+        private void ClearLiquidityDrawings()
+        {
+            Chart.RemoveObject(LiqHighLineName);
+            Chart.RemoveObject(LiqLowLineName);
+        }
+
+        private void ClearBosAndFvgDrawings()
+        {
+            Chart.RemoveObject(BosSwingLineName);
+            Chart.RemoveObject(FvgRectName);
+        }
+
+        private void ClearPendingOrderLines()
+        {
+            Chart.RemoveObject(PendingEntryLineName);
+            Chart.RemoveObject(PendingSlLineName);
+            Chart.RemoveObject(PendingTpLineName);
+        }
+
+        private void ClearAllStrategyDrawings()
+        {
+            ClearLiquidityDrawings();
+            ClearBosAndFvgDrawings();
+            ClearPendingOrderLines();
         }
     }
 }

@@ -7,6 +7,21 @@ using cAlgo.Indicators;
 
 namespace cAlgo.Robots
 {
+    // Enum to represent the type of liquidity sweep
+    public enum SweepType
+    {
+        None,
+        HighSwept,
+        LowSwept
+    }
+
+    public enum TrendContext
+    {
+        None,
+        Bullish,
+        Bearish
+    }
+
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class SilverBulletBot : Robot
     {
@@ -28,25 +43,25 @@ namespace cAlgo.Robots
         private int _tradesTakenToday = 0;
         private bool _dailyProfitTargetMet = false;
 
-        [Parameter("Minutes Before Session for Liquidity", DefaultValue = 10)]
+        [Parameter("Minutes Before Session for Liquidity", DefaultValue = 10, MinValue = 1, Group = "Session Timing")]
         public int MinutesBeforeSessionForLiquidity { get; set; }
 
-        [Parameter("Risk Percentage", DefaultValue = 1.0, MinValue = 0.1, MaxValue = 5.0)]
+        [Parameter("Risk Percentage", DefaultValue = 1.0, MinValue = 0.1, MaxValue = 5.0, Group = "Risk Management")]
         public double RiskPercentage { get; set; }
 
-        [Parameter("Risk Reward Ratio", DefaultValue = 1.5, MinValue = 0.5)]
+        [Parameter("Risk Reward Ratio", DefaultValue = 1.5, MinValue = 0.1, Group = "Risk Management")]
         public double RiskRewardRatio { get; set; }
 
-        [Parameter("Context TimeFrame", DefaultValue = "m15")]
+        [Parameter("Context TimeFrame", DefaultValue = "m15", Group = "TimeFrames")]
         public string ContextTimeFrameString { get; set; }
 
-        [Parameter("Execution TimeFrame", DefaultValue = "m3")]
+        [Parameter("Execution TimeFrame", DefaultValue = "m3", Group = "TimeFrames")]
         public string ExecutionTimeFrameString { get; set; }
 
-        [Parameter("Swing Lookback Period", DefaultValue = 20, MinValue = 3)]
+        [Parameter("Swing Lookback Period", DefaultValue = 20, MinValue = 3, Group = "Strategy Parameters")]
         public int SwingLookbackPeriod { get; set; }
 
-        [Parameter("Swing Candles", DefaultValue = 1, MinValue = 1, MaxValue = 3)] // Number of candles on each side for swing definition
+        [Parameter("Swing Candles", DefaultValue = 1, MinValue = 1, MaxValue = 3, Group = "Strategy Parameters")]
         public int SwingCandles { get; set; }
 
         [Parameter("M3 Viz Lookback (Bars)", DefaultValue = 20, Group = "Visualization")]
@@ -54,7 +69,17 @@ namespace cAlgo.Robots
 
         [Parameter("M3 Viz Sweep Forward (Bars)", DefaultValue = 5, Group = "Visualization")]
         public int M3SweepForwardLookForViz { get; set; }
-        
+
+        // Context Parameters
+        [Parameter("Trend Context TF", DefaultValue = "m15", Group = "Context")]
+        public string ContextTimeFrameForTrendString { get; set; }
+
+        [Parameter("Trend Lookback Candles", DefaultValue = 30, MinValue = 5, Group = "Context")]
+        public int ContextLookbackCandles { get; set; }
+
+        [Parameter("Trend Threshold", DefaultValue = 7, MinValue = 1, Group = "Context")]
+        public int ContextTrendThreshold { get; set; }
+
         // New York TimeZoneInfo
         private TimeZoneInfo _newYorkTimeZone;
         private TimeFrame _contextTimeFrame;
@@ -70,30 +95,32 @@ namespace cAlgo.Robots
         private DateTime _currentLiquiditySourceBarTimeNY;
         private DateTime _lastDateProcessedForSessionTimes = DateTime.MinValue;
 
-        private enum SweepType { None, HighSwept, LowSwept }
         private SweepType _lastSweepType = SweepType.None;
         private double _lastSweptLiquidityLevel;
         private DateTime _timeOfLastSweepNY; // Precise time of sweep (tick time)
         
         // Sweep Bar details on Context TimeFrame
-        private DateTime _sweepBarOpenTimeNY; // Open time of the M15 bar where sweep occurred (NY)
-        private double _sweepBarActualHighOnContextTF;
-        private double _sweepBarActualLowOnContextTF;
+        private DateTime _sweepBarOpenTimeNY = DateTime.MinValue; // Open time of the M15 bar that swept liquidity
+        private double _sweepBarActualHighOnContextTF = 0; // Actual high of the M15 sweep bar
+        private double _sweepBarActualLowOnContextTF = 0;  // Actual low of the M15 sweep bar
 
+        private double _relevantSwingLevelForBOS = 0; // The specific high/low of the M3 swing to be broken for BOS
+        private DateTime _relevantSwingBarTimeNY = DateTime.MinValue; // NYTime of the M3 bar that formed the _relevantSwingLevelForBOS
+        private double _bosLevel = 0; // Level at which BOS was confirmed
+        private DateTime _bosTimeNY = DateTime.MinValue; // Time BOS was confirmed (NY) on execution TF
+        private DateTime _fvgFoundOnBarOpenTimeNY = DateTime.MinValue; // NY Time of the M3 bar on which FVG was found
+        private double _lastFvgDetermined_High = 0;
+        private double _lastFvgDetermined_Low = 0;
+        private DateTime _fvgBarN_OpenTimeNY = DateTime.MinValue; // FVG Bar N (first bar of 3-bar FVG pattern) OpenTime NY
+        private DateTime _fvgBarN2_OpenTimeNY = DateTime.MinValue; // FVG Bar N+2 (third bar of 3-bar FVG pattern) OpenTime NY
+        private string _currentPendingOrderLabel = null;
+        private DateTime _lastDailyResetTimeNY = DateTime.MinValue;
 
-        private double _relevantSwingLevelForBOS;
-        private DateTime _relevantSwingBarTimeNY; // Open time of the identified swing bar (NY)
+        // Context Trend Fields
+        private TimeFrame _contextTimeFrameForTrend;
+        private TrendContext _currentTrendContext = TrendContext.None;
+        private DateTime _lastContextTrendCalculationTimeNY = DateTime.MinValue;
 
-        private double _bosLevel;
-        private DateTime _bosTimeNY;
-
-        private string _currentPendingOrderLabel; // To store the label of the active pending order
-        private double _lastFvgDetermined_Low;    // Stores Low of the identified FVG range for entry
-        private double _lastFvgDetermined_High;   // Stores High of the identified FVG range for entry
-        private double _fvgBarN_Low;              // Stores Low of the N bar (first bar of FVG pattern) of the found FVG
-        private double _fvgBarN_High;             // Stores High of the N bar (first bar of FVG pattern) of the found FVG
-        private DateTime _fvgBarN_OpenTimeNY;     // Open time of N bar for FVG
-        private DateTime _fvgBarN2_OpenTimeNY;    // Open time of N+2 bar for FVG
         private TimeSpan _contextTimeFrameTimeSpan; // To help with FVG rect drawing duration
 
         private struct SessionInfo
@@ -147,6 +174,18 @@ namespace cAlgo.Robots
                 _executionTimeFrame = TimeFrame.Minute3;
             }
 
+            try
+            {
+                _contextTimeFrameForTrend = ParseTimeFrame(ContextTimeFrameForTrendString);
+            }
+            catch (ArgumentException)
+            {
+                Print($"Error parsing ContextTimeFrameForTrendString: '{ContextTimeFrameForTrendString}'. Defaulting to m15.");
+                _contextTimeFrameForTrend = TimeFrame.Minute15;
+            }
+            Print($"Trend Context TimeFrame: {_contextTimeFrameForTrend}");
+            Print($"Trend Lookback Candles: {ContextLookbackCandles}, Trend Threshold: {ContextTrendThreshold}");
+
             Print("Silver Bullet Bot Started.");
             Print("Trading Sessions (NY Time): 03:00-04:00, 10:00-11:00, 14:00-15:00");
             Print($"Liquidity lookback: {MinutesBeforeSessionForLiquidity} minutes before session start.");
@@ -167,18 +206,17 @@ namespace cAlgo.Robots
         protected override void OnTick()
         {
             var currentTimeNY = GetNewYorkTime(Server.Time);
+
             DailyResetAndSessionTimeUpdate(currentTimeNY);
+            UpdateTrendContext(currentTimeNY);
+
+            // Visualize M3 sweeps (if enabled and during session)
+            VisualizeM3Sweeps();
 
             SessionInfo currentSession = GetCurrentSessionInfo(currentTimeNY);
 
-            // Attempt to visualize M3 sweeps on each tick
-            VisualizeM3Sweeps();
-
             if (_lastSweepType != SweepType.None)
             {
-                var contextBars = MarketData.GetBars(_contextTimeFrame);
-                if (contextBars.Count == 0) return;
-
                 if (_relevantSwingLevelForBOS == 0) 
                 {
                     IdentifyRelevantM3SwingForBOS(_sweepBarOpenTimeNY, _lastSweepType);
@@ -541,15 +579,7 @@ namespace cAlgo.Robots
             // If we reach here, no swing was found and returned from within the loops.
             if (_relevantSwingLevelForBOS == 0)
             {
-                Print($"IdentifyRelevantM3SwingForBOS: No M3 swing found. Resetting M15 sweep state for {m15LastSweepType}.");
-                _lastSweepType = SweepType.None;
-                // _relevantSwingLevelForBOS is already 0
-                _relevantSwingBarTimeNY = DateTime.MinValue;
-                _sweepBarOpenTimeNY = DateTime.MinValue; // Clear M15 sweep bar info
-                _sweepBarActualHighOnContextTF = 0;
-                _sweepBarActualLowOnContextTF = 0;
-                ClearBosAndFvgDrawings(); // Clears orange BOS line and FVG rect
-                Chart.RemoveObject(M3BosConfirmationLineName); // Clear M3 BOS confirmation line if any
+                ResetSweepAndBosState($"IdentifyRelevantM3SwingForBOS: No M3 swing found. Resetting M15 sweep state for {m15LastSweepType}.");
             }
         }
 
@@ -645,8 +675,6 @@ namespace cAlgo.Robots
                                 _lastFvgDetermined_Low = fvgLowBoundary;
                                 _lastFvgDetermined_High = fvgHighBoundary;
                                 // Store details of the N (fvgSearchIndex-1) and N+2 (fvgSearchIndex+1) bars of the FVG pattern on Execution TF
-                                _fvgBarN_High = executionBars.HighPrices[fvgSearchIndex-1]; 
-                                _fvgBarN_Low = executionBars.LowPrices[fvgSearchIndex-1];
                                 _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
                                 _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
                                 // Drawing FVG rectangle - using execution TF bar times.
@@ -663,8 +691,6 @@ namespace cAlgo.Robots
                                 Print($"Bullish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
                                 _lastFvgDetermined_Low = fvgLowBoundary;
                                 _lastFvgDetermined_High = fvgHighBoundary;
-                                _fvgBarN_Low = executionBars.LowPrices[fvgSearchIndex-1]; 
-                                _fvgBarN_High = executionBars.HighPrices[fvgSearchIndex-1];
                                 _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
                                 _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
                                 DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);
@@ -703,13 +729,7 @@ namespace cAlgo.Robots
 
             if (executionBars.Count -1 > firstBarToCheckForBOSIndexOnExecutionTF + bosTimeoutBars && firstBarToCheckForBOSIndexOnExecutionTF >=0) 
             {
-                Print($"No BOS detected on {_executionTimeFrame} within approx. {15 * GetTimeFrameInMinutes(_contextTimeFrame)} mins of M15 sweep. Resetting sweep state for {_lastSweepType}. M15 Sweep bar was {_sweepBarOpenTimeNY:HH:mm}");
-                _lastSweepType = SweepType.None;
-                _relevantSwingLevelForBOS = 0;
-                _sweepBarOpenTimeNY = DateTime.MinValue;
-                _sweepBarActualHighOnContextTF = 0;
-                _sweepBarActualLowOnContextTF = 0;
-                ClearBosAndFvgDrawings(); 
+                ResetSweepAndBosState($"No BOS detected on {_executionTimeFrame} within approx. {15 * GetTimeFrameInMinutes(_contextTimeFrame)} mins of M15 sweep. Resetting sweep state for {_lastSweepType}. M15 Sweep bar was {_sweepBarOpenTimeNY:HH:mm}");
             }
         }
 
@@ -901,27 +921,13 @@ namespace cAlgo.Robots
             
             if (tradeType == TradeType.Buy && entryPrice >= Symbol.Ask)
             {
-                Print($"Buy Limit entry {entryPrice} is at or above current Ask {Symbol.Ask}. Consider Market Order or adjust. Order not placed.");
-                // Full reset if order cannot be placed due to price.
-                _lastSweepType = SweepType.None;
-                _relevantSwingLevelForBOS = 0; 
-                _sweepBarOpenTimeNY = DateTime.MinValue;
-                _sweepBarActualHighOnContextTF = 0;
-                _sweepBarActualLowOnContextTF = 0;
-                ClearBosAndFvgDrawings(); // FVG might have been drawn
-                 return; 
+                ResetSweepAndBosState($"Buy Limit entry {entryPrice} is at or above current Ask {Symbol.Ask}. Order not placed. Full state reset.");
+                return; 
             }
             if (tradeType == TradeType.Sell && entryPrice <= Symbol.Bid)
             {
-                Print($"Sell Limit entry {entryPrice} is at or below current Bid {Symbol.Bid}. Consider Market Order or adjust. Order not placed.");
-                // Full reset if order cannot be placed due to price.
-                _lastSweepType = SweepType.None;
-                _relevantSwingLevelForBOS = 0;
-                _sweepBarOpenTimeNY = DateTime.MinValue;
-                _sweepBarActualHighOnContextTF = 0;
-                _sweepBarActualLowOnContextTF = 0;
-                ClearBosAndFvgDrawings(); // FVG might have been drawn
-                 return;
+                ResetSweepAndBosState($"Sell Limit entry {entryPrice} is at or below current Bid {Symbol.Bid}. Order not placed. Full state reset.");
+                return;
             }
 
             Print($"Preparing to place {tradeType} Limit Order: Label={newOrderLabel}, Vol={volume}, Entry={Math.Round(entryPrice, Symbol.Digits)}, SL={Math.Round(stopLossPrice, Symbol.Digits)} ({stopLossInPips} pips), TP={Math.Round(takeProfitPrice, Symbol.Digits)}");
@@ -1264,6 +1270,129 @@ namespace cAlgo.Robots
                         }
                     }
                 }
+            }
+        }
+
+        private void UpdateTrendContext(DateTime currentTimeNY)
+        {
+            var contextTFbars = MarketData.GetBars(_contextTimeFrameForTrend);
+            if (contextTFbars.Count < ContextLookbackCandles + 1) // Need at least LookbackCandles + 1 current bar
+            {
+                // Not enough data, or not enough historical data to form a lookback from a fully closed bar
+                if (_currentTrendContext != TrendContext.None)
+                {
+                     Print($"Trend Context: Not enough data on {_contextTimeFrameForTrend} to determine trend (requires {ContextLookbackCandles + 1} bars, have {contextTFbars.Count}). Setting to None.");
+                    _currentTrendContext = TrendContext.None;
+                    _lastContextTrendCalculationTimeNY = DateTime.MinValue; // Reset to allow recalculation when data is available
+                }
+                return;
+            }
+
+            // Use the last fully closed bar for calculation
+            int lastClosedBarIndex = contextTFbars.Count - 2;
+            DateTime lastClosedBarOpenTimeNY = GetNewYorkTime(contextTFbars.OpenTimes[lastClosedBarIndex]);
+
+            if (lastClosedBarOpenTimeNY == _lastContextTrendCalculationTimeNY)
+            {
+                return; // Already calculated for this bar
+            }
+
+            int bullishCount = 0;
+            int bearishCount = 0;
+            int firstBarToAnalyze = Math.Max(0, lastClosedBarIndex - ContextLookbackCandles + 1);
+
+            for (int i = firstBarToAnalyze; i <= lastClosedBarIndex; i++)
+            {
+                if (contextTFbars.ClosePrices[i] > contextTFbars.OpenPrices[i])
+                {
+                    bullishCount++;
+                }
+                else if (contextTFbars.ClosePrices[i] < contextTFbars.OpenPrices[i])
+                {
+                    bearishCount++;
+                }
+            }
+
+            TrendContext previousTrendContext = _currentTrendContext;
+            if (bullishCount - bearishCount >= ContextTrendThreshold)
+            {
+                _currentTrendContext = TrendContext.Bullish;
+            }
+            else if (bearishCount - bullishCount >= ContextTrendThreshold)
+            {
+                _currentTrendContext = TrendContext.Bearish;
+            }
+            else
+            {
+                _currentTrendContext = TrendContext.None;
+            }
+
+            if (_currentTrendContext != previousTrendContext || _lastContextTrendCalculationTimeNY == DateTime.MinValue) // Log on change or first run
+            {
+                Print($"Trend Context ({_contextTimeFrameForTrend}@{ContextLookbackCandles} candles, Thr:{ContextTrendThreshold}): {_currentTrendContext}. Bull: {bullishCount}, Bear: {bearishCount}. Based on bar: {lastClosedBarOpenTimeNY:yyyy-MM-dd HH:mm} NY.");
+            }
+            _lastContextTrendCalculationTimeNY = lastClosedBarOpenTimeNY;
+        }
+
+        private void ResetSweepAndBosState(string reason)
+        {
+            if (!string.IsNullOrWhiteSpace(reason)) // Only print if reason is provided
+            {
+                Print(reason);
+            }
+
+            _lastSweepType = SweepType.None;
+            _relevantSwingLevelForBOS = 0;
+            _relevantSwingBarTimeNY = DateTime.MinValue;
+            _sweepBarOpenTimeNY = DateTime.MinValue;
+            _sweepBarActualHighOnContextTF = 0;
+            _sweepBarActualLowOnContextTF = 0;
+            
+            _bosLevel = 0;
+            _bosTimeNY = DateTime.MinValue;
+            _fvgFoundOnBarOpenTimeNY = DateTime.MinValue;
+            _lastFvgDetermined_High = 0;
+            _lastFvgDetermined_Low = 0;
+            _fvgBarN_OpenTimeNY = DateTime.MinValue;
+            _fvgBarN2_OpenTimeNY = DateTime.MinValue;
+
+            // Clear drawings
+            ClearBosAndFvgDrawings(); // Clears BosSwingLineName and FvgRectName
+            Chart.RemoveObject(M3BosConfirmationLineName);
+            // Note: Liquidity lines (LiqHighLineName, LiqLowLineName) are managed by DailyReset or when new liquidity is identified.
+            // M3 Sweep visualization lines are managed by VisualizeM3Sweeps itself (cleared on each run).
+        }
+
+        private TimeFrame ParseTimeFrame(string timeFrameString, TimeFrame? defaultTimeFrame = null)
+        {
+            if (string.IsNullOrWhiteSpace(timeFrameString))
+            {
+                if (defaultTimeFrame.HasValue) return defaultTimeFrame.Value;
+                throw new ArgumentException("TimeFrame string cannot be empty when no default is provided.");
+            }
+
+            switch (timeFrameString.ToLowerInvariant())
+            {
+                case "m1": case "minute1": return TimeFrame.Minute;
+                case "m2": case "minute2": return TimeFrame.Minute2;
+                case "m3": case "minute3": return TimeFrame.Minute3;
+                case "m4": case "minute4": return TimeFrame.Minute4;
+                case "m5": case "minute5": return TimeFrame.Minute5;
+                case "m10": case "minute10": return TimeFrame.Minute10;
+                case "m15": case "minute15": return TimeFrame.Minute15;
+                case "m30": case "minute30": return TimeFrame.Minute30;
+                case "h1": case "hour1": return TimeFrame.Hour;
+                case "h4": case "hour4": return TimeFrame.Hour4;
+                case "d1": case "daily": return TimeFrame.Daily;
+                case "w1": case "weekly": return TimeFrame.Weekly;
+                case "mn1": case "monthly": return TimeFrame.Monthly;
+                default:
+                    if (defaultTimeFrame.HasValue)
+                    {
+                        Print($"Warning: Could not parse TimeFrame string '{timeFrameString}'. Defaulting to {defaultTimeFrame.Value}.");
+                        return defaultTimeFrame.Value;
+                    }
+                    throw new ArgumentException($"Could not parse TimeFrame string: {timeFrameString}");
             }
         }
     }

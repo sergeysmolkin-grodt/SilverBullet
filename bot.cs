@@ -18,6 +18,11 @@ namespace cAlgo.Robots
         private const string PendingEntryLineName = "SB_PendingEntryLine";
         private const string PendingSlLineName = "SB_PendingSlLine";
         private const string PendingTpLineName = "SB_PendingTpLine";
+        private const string M3BosConfirmationLineName = "SB_M3_BOS_Confirmation_Line";
+
+        // M3 Sweep Visualization Prefixes
+        private const string M3SweepHighVizPrefix = "M3SweepViz_High_";
+        private const string M3SweepLowVizPrefix = "M3SweepViz_Low_";
 
         // Daily Trading Limits
         private int _tradesTakenToday = 0;
@@ -43,6 +48,12 @@ namespace cAlgo.Robots
 
         [Parameter("Swing Candles", DefaultValue = 1, MinValue = 1, MaxValue = 3)] // Number of candles on each side for swing definition
         public int SwingCandles { get; set; }
+
+        [Parameter("M3 Viz Lookback (Bars)", DefaultValue = 20, Group = "Visualization")]
+        public int M3SwingLookbackForViz { get; set; }
+
+        [Parameter("M3 Viz Sweep Forward (Bars)", DefaultValue = 5, Group = "Visualization")]
+        public int M3SweepForwardLookForViz { get; set; }
         
         // New York TimeZoneInfo
         private TimeZoneInfo _newYorkTimeZone;
@@ -143,6 +154,7 @@ namespace cAlgo.Robots
             Print($"Context TimeFrame: {_contextTimeFrame}");
             Print($"Execution TimeFrame: {_executionTimeFrame}");
             Print($"Swing Lookback: {SwingLookbackPeriod} bars, Swing Candles: {SwingCandles}");
+            Print($"M3 Viz Lookback: {M3SwingLookbackForViz} bars, M3 Viz Sweep Forward: {M3SweepForwardLookForViz}");
 
             PendingOrders.Filled += OnPendingOrderFilled;
             PendingOrders.Cancelled += OnPendingOrderCancelled;
@@ -159,6 +171,9 @@ namespace cAlgo.Robots
 
             SessionInfo currentSession = GetCurrentSessionInfo(currentTimeNY);
 
+            // Attempt to visualize M3 sweeps on each tick
+            VisualizeM3Sweeps();
+
             if (_lastSweepType != SweepType.None)
             {
                 var contextBars = MarketData.GetBars(_contextTimeFrame);
@@ -166,7 +181,7 @@ namespace cAlgo.Robots
 
                 if (_relevantSwingLevelForBOS == 0) 
                 {
-                    IdentifyRelevantSwingForBOS(contextBars);
+                    IdentifyRelevantM3SwingForBOS(_sweepBarOpenTimeNY, _lastSweepType);
                 }
                 
                 if (_relevantSwingLevelForBOS != 0) 
@@ -202,7 +217,7 @@ namespace cAlgo.Robots
                 }
                 if (_lastSweepType != SweepType.None && _relevantSwingLevelForBOS == 0) // If sweep happened but no swing found, reset to re-evaluate liquidity
                 {
-                     // This condition is handled inside IdentifyRelevantSwingForBOS now
+                     // This condition is handled inside IdentifyRelevantM3SwingForBOS now
                 }
             }
         }
@@ -228,6 +243,7 @@ namespace cAlgo.Robots
             Positions.Closed -= OnPositionClosed;
 
             ClearAllStrategyDrawings();
+            ClearM3SweepVisualizations(); // Clear M3 sweep viz lines on stop
         }
 
         private DateTime GetNewYorkTime(DateTime serverTime)
@@ -272,6 +288,7 @@ namespace cAlgo.Robots
                 // Reset daily limits
                 _tradesTakenToday = 0;
                 _dailyProfitTargetMet = false;
+                ClearM3SweepVisualizations(); // Clear M3 sweep viz lines on daily reset
             }
         }
 
@@ -398,7 +415,7 @@ namespace cAlgo.Robots
                         _sweepBarActualHighOnContextTF = contextBars.HighPrices[sweepContextBarIndex];
                         _sweepBarActualLowOnContextTF = contextBars.LowPrices[sweepContextBarIndex];
                         Print($"Sweep occurred on M15 bar: {_sweepBarOpenTimeNY:yyyy-MM-dd HH:mm} NY, H: {_sweepBarActualHighOnContextTF}, L: {_sweepBarActualLowOnContextTF}");
-                        IdentifyRelevantSwingForBOS(contextBars); 
+                        IdentifyRelevantM3SwingForBOS(_sweepBarOpenTimeNY, _lastSweepType); 
                     }
                     else
                     {
@@ -411,6 +428,11 @@ namespace cAlgo.Robots
                     Print("Cannot identify swing for BOS or sweep bar details: Context bars are empty.");
                     _lastSweepType = SweepType.None; // Reset if we\' can\'t get bars
                 }
+            }
+
+            if (_lastSweepType != SweepType.None && _relevantSwingLevelForBOS == 0) // Only identify BOS structure if not already found
+            {
+                IdentifyRelevantM3SwingForBOS(_sweepBarOpenTimeNY, _lastSweepType);
             }
         }
 
@@ -442,74 +464,92 @@ namespace cAlgo.Robots
             return true;
         }
 
-        private void IdentifyRelevantSwingForBOS(Bars contextBars)
+        private void IdentifyRelevantM3SwingForBOS(DateTime m15SweepBarOpenTimeNY, SweepType m15LastSweepType)
         {
-            if (_lastSweepType == SweepType.None || contextBars.Count == 0 || _sweepBarOpenTimeNY == DateTime.MinValue)
+            var executionBars = MarketData.GetBars(_executionTimeFrame);
+            if (executionBars.Count == 0) return;
+
+            // Convert M15 sweep bar open time from NY to Server time for GetIndexByTime
+            DateTime m15SweepBarOpenTimeServer;
+            try
             {
-                Print("IdentifyRelevantSwingForBOS: Pre-conditions not met (No sweep, no bars, or sweep bar time not set).");
-                // If sweep bar time is not set, it implies an issue in CheckForLiquiditySweep, reset sweep.
-                if (_sweepBarOpenTimeNY == DateTime.MinValue && _lastSweepType != SweepType.None) _lastSweepType = SweepType.None;
+                m15SweepBarOpenTimeServer = TimeZoneInfo.ConvertTime(m15SweepBarOpenTimeNY, _newYorkTimeZone, TimeZone);
+            }
+            catch (ArgumentException ex)
+            {
+                Print($"Error converting M15 sweep bar time for GetIndexByTime: {ex.Message}. NYTime: {m15SweepBarOpenTimeNY}, TargetZone: {TimeZone.DisplayName}");
                 return;
             }
-
-            DateTime sweepBarOpenTimeUtc = TimeZoneInfo.ConvertTime(_sweepBarOpenTimeNY, _newYorkTimeZone, TimeZoneInfo.Utc);
-            int sweepBarIndex = contextBars.OpenTimes.GetIndexByTime(sweepBarOpenTimeUtc); 
             
-            if (sweepBarIndex < 0) 
+            int m3ReferenceBarIndex = executionBars.OpenTimes.GetIndexByTime(m15SweepBarOpenTimeServer);
+
+            if (m3ReferenceBarIndex < 0)
             {
-                Print($"Error: Could not find sweep bar index for time {_sweepBarOpenTimeNY} (UTC: {sweepBarOpenTimeUtc}). Resetting sweep.");
+                Print($"Error: Could not find an M3 bar corresponding to M15 sweep bar open time: {m15SweepBarOpenTimeNY:yyyy-MM-dd HH:mm} NY (Server: {m15SweepBarOpenTimeServer:yyyy-MM-dd HH:mm})");
+                // If we can't find the bar, it's a critical issue for this path, reset sweep state.
                 _lastSweepType = SweepType.None;
-                return;
-            }
-            
-            // _sweepBarTimeNY is already set with the M15 bar\'s open time from CheckForLiquiditySweep.
-
-            _relevantSwingLevelForBOS = 0; 
-            _relevantSwingBarTimeNY = DateTime.MinValue;
-
-            int searchStartIndex = sweepBarIndex - 1;
-            int searchEndIndex = Math.Max(0, sweepBarIndex - SwingLookbackPeriod);
-
-            Print($"Identifying relevant swing: Sweep Bar NY Time {_sweepBarOpenTimeNY:HH:mm}, Index {sweepBarIndex}. Searching from index {searchStartIndex} to {searchEndIndex}.");
-
-            if (_lastSweepType == SweepType.HighSwept) 
-            {
-                for (int i = searchStartIndex; i >= searchEndIndex; i--)
-                {
-                    if (IsSwingLow(i, contextBars, SwingCandles))
-                    {
-                        _relevantSwingLevelForBOS = contextBars.LowPrices[i];
-                        _relevantSwingBarTimeNY = GetNewYorkTime(contextBars.OpenTimes[i]);
-                        Print($"Relevant Swing Low for BOS identified at {_relevantSwingLevelForBOS} (Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after High Sweep.");
-                        DrawBosLevel(_relevantSwingLevelForBOS);
-                        return;
-                    }
-                }
-                Print("No relevant Swing Low found within lookback period for BOS after High Sweep. Resetting sweep state.");
-            }
-            else if (_lastSweepType == SweepType.LowSwept) 
-            {
-                for (int i = searchStartIndex; i >= searchEndIndex; i--)
-                {
-                    if (IsSwingHigh(i, contextBars, SwingCandles))
-                    {
-                        _relevantSwingLevelForBOS = contextBars.HighPrices[i];
-                        _relevantSwingBarTimeNY = GetNewYorkTime(contextBars.OpenTimes[i]);
-                        Print($"Relevant Swing High for BOS identified at {_relevantSwingLevelForBOS} (Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after Low Sweep.");
-                        DrawBosLevel(_relevantSwingLevelForBOS);
-                        return;
-                    }
-                }
-                Print("No relevant Swing High found within lookback period for BOS after Low Sweep. Resetting sweep state.");
-            }
-            
-            if(_relevantSwingLevelForBOS == 0)
-            {
-                _lastSweepType = SweepType.None; // Reset sweep if no relevant swing is found
+                _relevantSwingLevelForBOS = 0;
+                _relevantSwingBarTimeNY = DateTime.MinValue;
                 _sweepBarOpenTimeNY = DateTime.MinValue;
                 _sweepBarActualHighOnContextTF = 0;
                 _sweepBarActualLowOnContextTF = 0;
-                ClearBosAndFvgDrawings(); // Clear drawings if BOS but no FVG
+                ClearBosAndFvgDrawings();
+                Chart.RemoveObject(M3BosConfirmationLineName);
+                return;
+            }
+
+            // Define the loop range for searching M3 swings before the m3ReferenceBarIndex
+            int loopEndIndex = Math.Max(SwingCandles, m3ReferenceBarIndex - SwingCandles);
+            int loopStartIndex = Math.Max(SwingCandles, m3ReferenceBarIndex - SwingLookbackPeriod);
+
+
+            if (m15LastSweepType == SweepType.LowSwept) // After M15 Low sweep, look for an M3 Swing High to break (Bullish BOS)
+            {
+                for (int i = loopEndIndex; i >= loopStartIndex; i--)
+                {
+                    if (i < SwingCandles || i >= executionBars.ClosePrices.Count - SwingCandles) continue; 
+
+                    if (IsSwingHigh(i, executionBars, SwingCandles))
+                    {
+                        _relevantSwingLevelForBOS = executionBars.HighPrices[i];
+                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i]);
+                        Print($"Relevant M3 Swing High for BOS identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY on {_executionTimeFrame}) after M15 Low Sweep.");
+                        DrawBosLevel(_relevantSwingLevelForBOS, _relevantSwingBarTimeNY);
+                        return; // Found swing, exit
+                    }
+                }
+                Print($"No relevant M3 Swing High found for BOS within {SwingLookbackPeriod} bars on {_executionTimeFrame} prior to M15 sweep event at {m15SweepBarOpenTimeNY:HH:mm} NY.");
+            }
+            else if (m15LastSweepType == SweepType.HighSwept) // After M15 High sweep, look for an M3 Swing Low to break (Bearish BOS)
+            {
+                for (int i = loopEndIndex; i >= loopStartIndex; i--)
+                {
+                    if (i < SwingCandles || i >= executionBars.ClosePrices.Count - SwingCandles) continue; 
+                    
+                    if (IsSwingLow(i, executionBars, SwingCandles))
+                    {
+                        _relevantSwingLevelForBOS = executionBars.LowPrices[i];
+                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i]);
+                        Print($"Relevant M3 Swing Low for BOS identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY on {_executionTimeFrame}) after M15 High Sweep.");
+                        DrawBosLevel(_relevantSwingLevelForBOS, _relevantSwingBarTimeNY);
+                        return; // Found swing, exit
+                    }
+                }
+                Print($"No relevant M3 Swing Low found for BOS within {SwingLookbackPeriod} bars on {_executionTimeFrame} prior to M15 sweep event at {m15SweepBarOpenTimeNY:HH:mm} NY.");
+            }
+
+            // If we reach here, no swing was found and returned from within the loops.
+            if (_relevantSwingLevelForBOS == 0)
+            {
+                Print($"IdentifyRelevantM3SwingForBOS: No M3 swing found. Resetting M15 sweep state for {m15LastSweepType}.");
+                _lastSweepType = SweepType.None;
+                // _relevantSwingLevelForBOS is already 0
+                _relevantSwingBarTimeNY = DateTime.MinValue;
+                _sweepBarOpenTimeNY = DateTime.MinValue; // Clear M15 sweep bar info
+                _sweepBarActualHighOnContextTF = 0;
+                _sweepBarActualLowOnContextTF = 0;
+                ClearBosAndFvgDrawings(); // Clears orange BOS line and FVG rect
+                Chart.RemoveObject(M3BosConfirmationLineName); // Clear M3 BOS confirmation line if any
             }
         }
 
@@ -567,6 +607,7 @@ namespace cAlgo.Robots
                     _bosTimeNY = bosCandidateBarOpenTimeNY; // M3 bar time
                     Print($"BEARISH BOS DETECTED on {_executionTimeFrame} at bar {_bosTimeNY:yyyy-MM-dd HH:mm} NY. Structure broken below Swing Low (M15): {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)}. Sweep was: {_lastSweepType}");
                     bosConfirmedThisBar = true;
+                    DrawM3BosConfirmationLine(GetNewYorkTime(executionBars.OpenTimes[bosCandidateBarIndex]), SweepType.HighSwept);
                 }
                 else if (_lastSweepType == SweepType.LowSwept && executionBars.ClosePrices[bosCandidateBarIndex] > _relevantSwingLevelForBOS) 
                 {
@@ -574,6 +615,7 @@ namespace cAlgo.Robots
                     _bosTimeNY = bosCandidateBarOpenTimeNY; // M3 bar time
                     Print($"BULLISH BOS DETECTED on {_executionTimeFrame} at bar {_bosTimeNY:yyyy-MM-dd HH:mm} NY. Structure broken above Swing High (M15): {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)}. Sweep was: {_lastSweepType}");
                     bosConfirmedThisBar = true;
+                    DrawM3BosConfirmationLine(GetNewYorkTime(executionBars.OpenTimes[bosCandidateBarIndex]), SweepType.LowSwept);
                 }
 
                 if (bosConfirmedThisBar)
@@ -860,11 +902,25 @@ namespace cAlgo.Robots
             if (tradeType == TradeType.Buy && entryPrice >= Symbol.Ask)
             {
                 Print($"Buy Limit entry {entryPrice} is at or above current Ask {Symbol.Ask}. Consider Market Order or adjust. Order not placed.");
+                // Full reset if order cannot be placed due to price.
+                _lastSweepType = SweepType.None;
+                _relevantSwingLevelForBOS = 0; 
+                _sweepBarOpenTimeNY = DateTime.MinValue;
+                _sweepBarActualHighOnContextTF = 0;
+                _sweepBarActualLowOnContextTF = 0;
+                ClearBosAndFvgDrawings(); // FVG might have been drawn
                  return; 
             }
             if (tradeType == TradeType.Sell && entryPrice <= Symbol.Bid)
             {
                 Print($"Sell Limit entry {entryPrice} is at or below current Bid {Symbol.Bid}. Consider Market Order or adjust. Order not placed.");
+                // Full reset if order cannot be placed due to price.
+                _lastSweepType = SweepType.None;
+                _relevantSwingLevelForBOS = 0;
+                _sweepBarOpenTimeNY = DateTime.MinValue;
+                _sweepBarActualHighOnContextTF = 0;
+                _sweepBarActualLowOnContextTF = 0;
+                ClearBosAndFvgDrawings(); // FVG might have been drawn
                  return;
             }
 
@@ -1032,10 +1088,18 @@ namespace cAlgo.Robots
             if (low != 0) Chart.DrawHorizontalLine(LiqLowLineName, low, Color.Red, 2, LineStyle.Solid);
         }
 
-        private void DrawBosLevel(double level)
+        private void DrawBosLevel(double level, DateTime swingBarOpenTimeNY)
         {
             Chart.RemoveObject(BosSwingLineName);
-            if (level != 0) Chart.DrawHorizontalLine(BosSwingLineName, level, Color.Orange, 2, LineStyle.Dots);
+            if (level != 0 && swingBarOpenTimeNY != DateTime.MinValue)
+            {
+                DateTime startTimeServer = TimeZoneInfo.ConvertTime(swingBarOpenTimeNY, _newYorkTimeZone, TimeZone);
+                // Extend the line for a fixed number of execution bars (e.g., 10 bars)
+                TimeSpan executionBarDuration = GetTimeFrameTimeSpan(_executionTimeFrame);
+                DateTime endTimeServer = startTimeServer.Add(TimeSpan.FromTicks(executionBarDuration.Ticks * 10)); 
+
+                Chart.DrawTrendLine(BosSwingLineName, startTimeServer, level, endTimeServer, level, Color.Orange, 2, LineStyle.Dots);
+            }
         }
 
         private void DrawFvgRectangle(DateTime startTimeNY, double topPrice, DateTime endTimeNY, double bottomPrice, TimeFrame frameForDuration)
@@ -1083,6 +1147,7 @@ namespace cAlgo.Robots
         {
             Chart.RemoveObject(BosSwingLineName);
             Chart.RemoveObject(FvgRectName);
+            Chart.RemoveObject(M3BosConfirmationLineName);
         }
 
         private void ClearPendingOrderLines()
@@ -1097,6 +1162,109 @@ namespace cAlgo.Robots
             ClearLiquidityDrawings();
             ClearBosAndFvgDrawings();
             ClearPendingOrderLines();
+            // Note: M3 Sweep visualizations are cleared separately by ClearM3SweepVisualizations
+        }
+
+        private void ClearM3SweepVisualizations()
+        {
+            // Iterate backwards to safely remove from the collection of chart objects
+            for (int i = Chart.Objects.Count - 1; i >= 0; i--)
+            {
+                var chartObject = Chart.Objects[i];
+                if (chartObject.Name.StartsWith(M3SweepHighVizPrefix) || chartObject.Name.StartsWith(M3SweepLowVizPrefix))
+                {
+                    Chart.RemoveObject(chartObject.Name);
+                }
+            }
+        }
+
+        private void DrawM3BosConfirmationLine(DateTime bosConfirmationBarTimeNY, SweepType originalSweepDirection)
+        {
+            Chart.RemoveObject(M3BosConfirmationLineName); // Remove previous one, if any
+            DateTime serverTime = TimeZoneInfo.ConvertTime(bosConfirmationBarTimeNY, _newYorkTimeZone, TimeZone);
+            Color lineColor;
+            // The color depends on the direction of the BOS, which is opposite to the initial sweep for the swing identification,
+            // but same direction logic as _lastSweepType leading to the BOS check.
+            if (originalSweepDirection == SweepType.LowSwept) // Original M15 sweep was low, so M3 BOS is UP (Bullish)
+            {
+                lineColor = Color.DarkGreen;
+            }
+            else // Original M15 sweep was high, so M3 BOS is DOWN (Bearish)
+            {
+                lineColor = Color.DarkRed;
+            }
+            Chart.DrawVerticalLine(M3BosConfirmationLineName, serverTime, lineColor, 2, LineStyle.Solid);
+        }
+
+        private void VisualizeM3Sweeps()
+        {
+            var currentTimeNY = GetNewYorkTime(Server.Time);
+            SessionInfo currentSession = GetCurrentSessionInfo(currentTimeNY);
+
+            if (!currentSession.IsActivePeriod)
+            {
+                // Only visualize M3 sweeps during active NY session periods (including pre-buffer)
+                return;
+            }
+
+            var m3Bars = MarketData.GetBars(_executionTimeFrame);
+            if (m3Bars.Count == 0) return;
+
+            // Define the range of bars to check for swings
+            // The swing bar must be old enough to have M3SweepForwardLookForViz bars after it for checking a sweep.
+            int latestPossibleSwingBarIndex = m3Bars.Count - 1 - M3SweepForwardLookForViz;
+            // The earliest bar we'll check for a swing. Go back M3SwingLookbackForViz bars from latestPossibleSwingBarIndex.
+            int earliestBarToConsiderForSwing = Math.Max(SwingCandles, latestPossibleSwingBarIndex - M3SwingLookbackForViz +1); // +1 because lookback is a count
+
+            if (latestPossibleSwingBarIndex < SwingCandles || latestPossibleSwingBarIndex < earliestBarToConsiderForSwing) // Not enough data
+                return;
+
+            for (int swingIndex = latestPossibleSwingBarIndex; swingIndex >= earliestBarToConsiderForSwing; swingIndex--)
+            {
+                // Check for M3 Swing High at swingIndex
+                if (IsSwingHigh(swingIndex, m3Bars, SwingCandles))
+                {
+                    double swingHighLevel = m3Bars.HighPrices[swingIndex];
+                    DateTime swingHighOpenTime = m3Bars.OpenTimes[swingIndex];
+
+                    for (int sweepCheckIndex = swingIndex + 1;
+                         sweepCheckIndex <= swingIndex + M3SweepForwardLookForViz && sweepCheckIndex < m3Bars.Count;
+                         sweepCheckIndex++)
+                    {
+                        if (m3Bars.HighPrices[sweepCheckIndex] > swingHighLevel)
+                        {
+                            DateTime sweepBarOpenTime = m3Bars.OpenTimes[sweepCheckIndex];
+                            DateTime sweepBarEndTime = sweepBarOpenTime.Add(GetTimeFrameTimeSpan(_executionTimeFrame));
+                            string objName = $"{M3SweepHighVizPrefix}{swingHighOpenTime.Ticks}_{sweepBarOpenTime.Ticks}";
+                            
+                            Chart.DrawTrendLine(objName, swingHighOpenTime, swingHighLevel, sweepBarEndTime, swingHighLevel, Color.Cyan, 1, LineStyle.Dots);
+                            break; 
+                        }
+                    }
+                }
+
+                // Check for M3 Swing Low at swingIndex
+                if (IsSwingLow(swingIndex, m3Bars, SwingCandles))
+                {
+                    double swingLowLevel = m3Bars.LowPrices[swingIndex];
+                    DateTime swingLowOpenTime = m3Bars.OpenTimes[swingIndex];
+
+                    for (int sweepCheckIndex = swingIndex + 1;
+                         sweepCheckIndex <= swingIndex + M3SweepForwardLookForViz && sweepCheckIndex < m3Bars.Count;
+                         sweepCheckIndex++)
+                    {
+                        if (m3Bars.LowPrices[sweepCheckIndex] < swingLowLevel)
+                        {
+                            DateTime sweepBarOpenTime = m3Bars.OpenTimes[sweepCheckIndex];
+                            DateTime sweepBarEndTime = sweepBarOpenTime.Add(GetTimeFrameTimeSpan(_executionTimeFrame));
+                            string objName = $"{M3SweepLowVizPrefix}{swingLowOpenTime.Ticks}_{sweepBarOpenTime.Ticks}";
+
+                            Chart.DrawTrendLine(objName, swingLowOpenTime, swingLowLevel, sweepBarEndTime, swingLowLevel, Color.Magenta, 1, LineStyle.Dots);
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 }

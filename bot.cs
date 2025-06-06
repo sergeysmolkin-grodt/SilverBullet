@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Collections.Generic;
 using cAlgo.API;
 using cAlgo.API.Indicators;
 using cAlgo.API.Internals;
@@ -33,11 +34,24 @@ namespace cAlgo.Robots
         private const string PendingSlLineName = "SB_PendingSlLine";
         private const string PendingTpLineName = "SB_PendingTpLine";
         private const string M1BosConfirmationLineName = "SB_M1_BOS_Confirmation_Line";
+        private const string SweepLineName = "SB_SweepLine";
+
+        // Text Object Names
+        private const string LiqHighTextName = "SB_LiqHighText";
+        private const string LiqLowTextName = "SB_LiqLowText";
+        private const string BosLevelTextName = "SB_BosLevelText";
+        private const string FvgTextName = "SB_FvgText";
+        private const string PendingEntryTextName = "SB_PendingEntryText";
+        private const string PendingSlTextName = "SB_PendingSlText";
+        private const string PendingTpTextName = "SB_PendingTpText";
+        private const string SweepTextName = "SB_SweepText";
+        private const string M1BosConfirmationTextName = "SB_M1BosConfirmationText";
 
         // Strategy Constants
         private const double RiskPercentage = 1.0;
         private const string ContextTimeFrameString = "m1";
         private const string ExecutionTimeFrameString = "m1";
+        private const int MaxLiquidityLevelsToDraw = 5;
 
         // Daily Trading Limits
         private int _tradesTakenToday = 0;
@@ -71,13 +85,13 @@ namespace cAlgo.Robots
         private DateTime _session1ActualEndNY, _session2ActualEndNY, _session3ActualEndNY;
         private bool _liquidityIdentifiedForSession1, _liquidityIdentifiedForSession2, _liquidityIdentifiedForSession3;
         
-        private double _currentLiquidityHigh;
-        private double _currentLiquidityLow;
+        private List<Tuple<double, DateTime>> _liquidityHighs;
+        private List<Tuple<double, DateTime>> _liquidityLows;
         private DateTime _lastDateProcessedForSessionTimes = DateTime.MinValue;
 
         private SweepType _lastSweepType = SweepType.None;
         private double _lastSweptLiquidityLevel;
-        private DateTime _timeOfLastSweepNY; // Precise time of sweep (tick time)
+        private DateTime _timeOfLastSweepNY = DateTime.MinValue; // Precise time of sweep (tick time)
         
         // Sweep Bar details on Execution TimeFrame (M1)
         private double _sweepBarHigh;
@@ -129,6 +143,9 @@ namespace cAlgo.Robots
                 Print($"Error initializing New York Time Zone: {ex.Message}. Bot will use UTC.");
                 _newYorkTimeZone = TimeZoneInfo.Utc;
             }
+
+            _liquidityHighs = new List<Tuple<double, DateTime>>();
+            _liquidityLows = new List<Tuple<double, DateTime>>();
 
             try
             {
@@ -201,19 +218,20 @@ namespace cAlgo.Robots
 
                 relevantLiquidityFlag = GetLiquidityIdentifiedFlag(currentSession.SessionNumber);
 
-                if (relevantLiquidityFlag && (_currentLiquidityHigh != 0 || _currentLiquidityLow != 0))
+                if (relevantLiquidityFlag && (_liquidityHighs.Count > 0 || _liquidityLows.Count > 0))
                 {
                     CheckForLiquiditySweep(currentTimeNY);
                 }
             }
             else
             {
-                if (_currentLiquidityHigh != 0 || _currentLiquidityLow != 0)
+                if (_liquidityHighs.Count > 0 || _liquidityLows.Count > 0)
                 {
                     if (!_liquidityIdentifiedForSession1 && !_liquidityIdentifiedForSession2 && !_liquidityIdentifiedForSession3 && _lastSweepType == SweepType.None)
                     {
-                        _currentLiquidityHigh = 0;
-                        _currentLiquidityLow = 0;
+                        _liquidityHighs.Clear();
+                        _liquidityLows.Clear();
+                        ClearLiquidityDrawings();
                     }
                 }
                 if (_lastSweepType != SweepType.None && _relevantSwingLevelForBOS == 0) // If sweep happened but no swing found, reset to re-evaluate liquidity
@@ -277,8 +295,8 @@ namespace cAlgo.Robots
                 _liquidityIdentifiedForSession1 = false;
                 _liquidityIdentifiedForSession2 = false;
                 _liquidityIdentifiedForSession3 = false;
-                _currentLiquidityHigh = 0;
-                _currentLiquidityLow = 0;
+                _liquidityHighs.Clear();
+                _liquidityLows.Clear();
                 _lastSweepType = SweepType.None; // Reset sweep type for new day
                 _relevantSwingLevelForBOS = 0;
                 _sweepBarTimeNY = DateTime.MinValue;
@@ -361,41 +379,48 @@ namespace cAlgo.Robots
             }
 
             int startIndex = Math.Max(0, endIndex - SwingLookbackPeriod);
-            double highestSwingHigh = 0;
-            double lowestSwingLow = double.MaxValue;
-            DateTime swingHighTime = DateTime.MinValue;
-            DateTime swingLowTime = DateTime.MinValue;
+            
+            _liquidityHighs.Clear();
+            _liquidityLows.Clear();
 
-            // Find the highest swing high and lowest swing low in the lookback period
+            double highestHighSince = 0;
+            double lowestLowSince = double.MaxValue;
+
+            // Find all *uncovered* swing points in the lookback period, iterating from recent to past
             for (int i = endIndex; i >= startIndex; i--)
             {
+                // Check for an uncovered swing high
                 if (IsSwingHigh(i, contextBars, SwingCandles))
                 {
-                    if(contextBars.HighPrices[i] > highestSwingHigh)
+                    if (contextBars.HighPrices[i] > highestHighSince)
                     {
-                        highestSwingHigh = contextBars.HighPrices[i];
-                        swingHighTime = GetNewYorkTime(contextBars.OpenTimes[i]);
+                        _liquidityHighs.Add(new Tuple<double, DateTime>(contextBars.HighPrices[i], GetNewYorkTime(contextBars.OpenTimes[i])));
                     }
                 }
 
+                // Check for an uncovered swing low
                 if (IsSwingLow(i, contextBars, SwingCandles))
                 {
-                    if(contextBars.LowPrices[i] < lowestSwingLow)
+                    if (contextBars.LowPrices[i] < lowestLowSince)
                     {
-                        lowestSwingLow = contextBars.LowPrices[i];
-                        swingLowTime = GetNewYorkTime(contextBars.OpenTimes[i]);
+                        _liquidityLows.Add(new Tuple<double, DateTime>(contextBars.LowPrices[i], GetNewYorkTime(contextBars.OpenTimes[i])));
                     }
                 }
+
+                // Update the running min/max for the next iteration (which is further in the past)
+                highestHighSince = Math.Max(highestHighSince, contextBars.HighPrices[i]);
+                lowestLowSince = Math.Min(lowestLowSince, contextBars.LowPrices[i]);
             }
             
-            _currentLiquidityHigh = highestSwingHigh;
-            _currentLiquidityLow = (lowestSwingLow == double.MaxValue) ? 0 : lowestSwingLow;
+            // By not sorting by price, we prioritize the most recent swings found in the loop.
+            // _liquidityHighs = _liquidityHighs.OrderByDescending(x => x.Item1).ToList();
+            // _liquidityLows = _liquidityLows.OrderBy(x => x.Item1).ToList();
 
-            if (_currentLiquidityHigh != 0 || _currentLiquidityLow != 0)
+            if (_liquidityHighs.Count > 0 || _liquidityLows.Count > 0)
             {
                  SetLiquidityIdentifiedFlag(sessionNumber, true);
-                Print($"Session {sessionNumber} ({sessionActualStartNY:HH:mm} NY): Liquidity identified. High: {Math.Round(_currentLiquidityHigh, Symbol.Digits)} (from {swingHighTime:HH:mm}), Low: {Math.Round(_currentLiquidityLow, Symbol.Digits)} (from {swingLowTime:HH:mm})");
-                DrawLiquidityLevels(_currentLiquidityHigh, _currentLiquidityLow);
+                Print($"Session {sessionNumber} ({sessionActualStartNY:HH:mm} NY): Liquidity identified. Found {_liquidityHighs.Count} Highs and {_liquidityLows.Count} Lows.");
+                DrawLiquidityLevels(_liquidityHighs, _liquidityLows, sessionActualStartNY);
             }
             else
             {
@@ -405,7 +430,7 @@ namespace cAlgo.Robots
 
         private void CheckForLiquiditySweep(DateTime currentTimeNY)
         {
-            if ((_currentLiquidityHigh == 0 && _currentLiquidityLow == 0) || _lastSweepType != SweepType.None) return;
+            if ((_liquidityHighs.Count == 0 && _liquidityLows.Count == 0) || _lastSweepType != SweepType.None) return;
 
             var executionBars = MarketData.GetBars(_executionTimeFrame);
             if (executionBars.Count == 0) return;
@@ -414,48 +439,62 @@ namespace cAlgo.Robots
             double currentAsk = Symbol.Ask;
             double currentBid = Symbol.Bid;
             SweepType detectedSweepThisTick = SweepType.None;
+            Tuple<double, DateTime> sweptLevel = null;
 
-            if (_currentLiquidityHigh != 0 && (lastBar.High > _currentLiquidityHigh || currentAsk > _currentLiquidityHigh))
+            // Check for high sweeps
+            foreach (var liqHigh in _liquidityHighs)
             {
-                Print($"HIGH LIQUIDITY SWEPT at {_currentLiquidityHigh}. Price: {Math.Max(lastBar.High, currentAsk)}, Time: {currentTimeNY:HH:mm:ss} NY");
-                detectedSweepThisTick = SweepType.HighSwept;
-                _lastSweptLiquidityLevel = _currentLiquidityHigh;
+                if (lastBar.High > liqHigh.Item1 || currentAsk > liqHigh.Item1)
+                {
+                    Print($"HIGH LIQUIDITY SWEPT at {liqHigh.Item1}. Price: {Math.Max(lastBar.High, currentAsk)}, Time: {currentTimeNY:HH:mm:ss} NY");
+                    detectedSweepThisTick = SweepType.HighSwept;
+                    _lastSweptLiquidityLevel = liqHigh.Item1;
+                    sweptLevel = liqHigh;
+                    break;
+                }
             }
-            else if (_currentLiquidityLow != 0 && (lastBar.Low < _currentLiquidityLow || currentBid < _currentLiquidityLow))
+
+            // If no high was swept, check for low sweeps
+            if (detectedSweepThisTick == SweepType.None)
             {
-                Print($"LOW LIQUIDITY SWEPT at {_currentLiquidityLow}. Price: {Math.Min(lastBar.Low, currentBid)}, Time: {currentTimeNY:HH:mm:ss} NY");
-                detectedSweepThisTick = SweepType.LowSwept;
-                _lastSweptLiquidityLevel = _currentLiquidityLow;
+                foreach (var liqLow in _liquidityLows)
+                {
+                    if (lastBar.Low < liqLow.Item1 || currentBid < liqLow.Item1)
+                    {
+                        Print($"LOW LIQUIDITY SWEPT at {liqLow.Item1}. Price: {Math.Min(lastBar.Low, currentBid)}, Time: {currentTimeNY:HH:mm:ss} NY");
+                        detectedSweepThisTick = SweepType.LowSwept;
+                        _lastSweptLiquidityLevel = liqLow.Item1;
+                        sweptLevel = liqLow;
+                        break;
+                    }
+                }
             }
+
 
             if (detectedSweepThisTick != SweepType.None)
             {
                 _lastSweepType = detectedSweepThisTick;
                 _timeOfLastSweepNY = currentTimeNY; // Tick time of sweep
                 
-                _currentLiquidityHigh = 0; 
-                _currentLiquidityLow = 0;
+                int sweepBarIndex = executionBars.Count - 1;
+                _sweepBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[sweepBarIndex]);
+                _sweepBarHigh = executionBars.HighPrices[sweepBarIndex];
+                _sweepBarLow = executionBars.LowPrices[sweepBarIndex];
 
-                if (executionBars.Count > 0)
+                if (detectedSweepThisTick == SweepType.HighSwept)
                 {
-                    // The sweep happens on the currently forming bar
-                    int sweepBarIndex = executionBars.Count - 1;
-                    _sweepBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[sweepBarIndex]);
-                    _sweepBarHigh = executionBars.HighPrices[sweepBarIndex];
-                    _sweepBarLow = executionBars.LowPrices[sweepBarIndex];
-                    Print($"Sweep occurred on M1 bar: {_sweepBarTimeNY:yyyy-MM-dd HH:mm} NY, H: {_sweepBarHigh}, L: {_sweepBarLow}");
-                    IdentifyRelevantM1SwingForBOS(_sweepBarTimeNY, _lastSweepType); 
+                    DrawSweepLine(sweptLevel.Item2, _lastSweptLiquidityLevel, _sweepBarTimeNY, _sweepBarHigh);
                 }
-                else
+                else // LowSwept
                 {
-                    Print("Cannot identify swing for BOS or sweep bar details: Execution bars are empty.");
-                    _lastSweepType = SweepType.None; // Reset if we can't get bars
+                    DrawSweepLine(sweptLevel.Item2, _lastSweptLiquidityLevel, _sweepBarTimeNY, _sweepBarLow);
                 }
-            }
 
-            if (_lastSweepType != SweepType.None && _relevantSwingLevelForBOS == 0) // Only identify BOS structure if not already found
-            {
-                IdentifyRelevantM1SwingForBOS(_sweepBarTimeNY, _lastSweepType);
+                _liquidityHighs.Clear();
+                _liquidityLows.Clear();
+                
+                Print($"Sweep occurred on M1 bar: {_sweepBarTimeNY:yyyy-MM-dd HH:mm} NY, H: {_sweepBarHigh}, L: {_sweepBarLow}");
+                IdentifyRelevantM1SwingForBOS(_sweepBarTimeNY, _lastSweepType); 
             }
         }
 
@@ -1154,17 +1193,41 @@ namespace cAlgo.Robots
             return TimeSpan.FromMinutes(1); // Defaulting to 1 minute as a safer fallback.
         }
 
-        private void DrawLiquidityLevels(double high, double low)
+        private void DrawLiquidityLevels(List<Tuple<double, DateTime>> highs, List<Tuple<double, DateTime>> lows, DateTime sessionStartTimeNY)
         {
-            Chart.RemoveObject(LiqHighLineName);
-            Chart.RemoveObject(LiqLowLineName);
-            if (high != 0) Chart.DrawHorizontalLine(LiqHighLineName, high, Color.Blue, 2, LineStyle.Solid);
-            if (low != 0) Chart.DrawHorizontalLine(LiqLowLineName, low, Color.Red, 2, LineStyle.Solid);
+            ClearLiquidityDrawings();
+
+            for (int i = 0; i < Math.Min(highs.Count, MaxLiquidityLevelsToDraw); i++)
+            {
+                var high = highs[i].Item1;
+                var highTime = highs[i].Item2;
+                if (high != 0 && highTime != DateTime.MinValue)
+                {
+                    DateTime startTimeServer = TimeZoneInfo.ConvertTime(highTime, _newYorkTimeZone, TimeZone);
+                    DateTime endTimeServer = TimeZoneInfo.ConvertTime(sessionStartTimeNY, _newYorkTimeZone, TimeZone);
+                    Chart.DrawTrendLine(LiqHighLineName + i, startTimeServer, high, endTimeServer, high, Color.Blue, 2, LineStyle.Solid);
+                    Chart.DrawText(LiqHighTextName + i, "Liq High", endTimeServer, high, Color.Blue).VerticalAlignment = VerticalAlignment.Bottom;
+                }
+            }
+
+            for (int i = 0; i < Math.Min(lows.Count, MaxLiquidityLevelsToDraw); i++)
+            {
+                var low = lows[i].Item1;
+                var lowTime = lows[i].Item2;
+                if (low != 0 && lowTime != DateTime.MinValue)
+                {
+                    DateTime startTimeServer = TimeZoneInfo.ConvertTime(lowTime, _newYorkTimeZone, TimeZone);
+                    DateTime endTimeServer = TimeZoneInfo.ConvertTime(sessionStartTimeNY, _newYorkTimeZone, TimeZone);
+                    Chart.DrawTrendLine(LiqLowLineName + i, startTimeServer, low, endTimeServer, low, Color.Red, 2, LineStyle.Solid);
+                    Chart.DrawText(LiqLowTextName + i, "Liq Low", endTimeServer, low, Color.Red).VerticalAlignment = VerticalAlignment.Bottom;
+                }
+            }
         }
 
         private void DrawBosLevel(double level, DateTime swingBarOpenTimeNY)
         {
             Chart.RemoveObject(BosSwingLineName);
+            Chart.RemoveObject(BosLevelTextName);
             if (level != 0 && swingBarOpenTimeNY != DateTime.MinValue)
             {
                 DateTime startTimeServer = TimeZoneInfo.ConvertTime(swingBarOpenTimeNY, _newYorkTimeZone, TimeZone);
@@ -1173,12 +1236,14 @@ namespace cAlgo.Robots
                 DateTime endTimeServer = startTimeServer.Add(TimeSpan.FromTicks(executionBarDuration.Ticks * 10)); 
 
                 Chart.DrawTrendLine(BosSwingLineName, startTimeServer, level, endTimeServer, level, Color.Orange, 2, LineStyle.Dots);
+                Chart.DrawText(BosLevelTextName, "BOS Level", endTimeServer, level, Color.Orange).VerticalAlignment = VerticalAlignment.Bottom;
             }
         }
 
         private void DrawFvgRectangle(DateTime startTimeNY, double topPrice, DateTime endTimeNY, double bottomPrice, TimeFrame frameForDuration)
         {
             Chart.RemoveObject(FvgRectName);
+            Chart.RemoveObject(FvgTextName);
             TimeSpan barDuration = GetTimeFrameTimeSpan(frameForDuration);
 
             DateTime actualEndTimeNY = endTimeNY;
@@ -1200,21 +1265,45 @@ namespace cAlgo.Robots
                 // Let's make it span from N-1 open to N+2 open + N+2 duration
                 var rect = Chart.DrawRectangle(FvgRectName, startTimeServer, rectTop, endTimeServer.Add(barDuration), rectBottom, Color.FromArgb(80, Color.Gray.R, Color.Gray.G, Color.Gray.B));
                 rect.IsFilled = true;
+                Chart.DrawText(FvgTextName, "FVG", endTimeServer.Add(barDuration), rectTop, Color.Gray).VerticalAlignment = VerticalAlignment.Bottom;
             }
         }
 
         private void DrawPendingOrderLines(double entry, double sl, double tp)
         {
             ClearPendingOrderLines();
-            if (entry != 0) Chart.DrawHorizontalLine(PendingEntryLineName, entry, Color.Green, 2, LineStyle.Dots);
-            if (sl != 0) Chart.DrawHorizontalLine(PendingSlLineName, sl, Color.Red, 2, LineStyle.Dots);
-            if (tp != 0) Chart.DrawHorizontalLine(PendingTpLineName, tp, Color.DodgerBlue, 2, LineStyle.Dots);
+            var executionBars = MarketData.GetBars(_executionTimeFrame);
+            if (executionBars.Count == 0) return;
+            var lastBarTime = executionBars.Last().OpenTime;
+            
+            if (entry != 0)
+            {
+                Chart.DrawHorizontalLine(PendingEntryLineName, entry, Color.Green, 2, LineStyle.Dots);
+                Chart.DrawText(PendingEntryTextName, "Entry", lastBarTime, entry, Color.Green).VerticalAlignment = VerticalAlignment.Bottom;
+            }
+
+            if (sl != 0)
+            {
+                Chart.DrawHorizontalLine(PendingSlLineName, sl, Color.Red, 2, LineStyle.Dots);
+                Chart.DrawText(PendingSlTextName, "SL", lastBarTime, sl, Color.Red).VerticalAlignment = VerticalAlignment.Bottom;
+            }
+
+            if (tp != 0)
+            {
+                Chart.DrawHorizontalLine(PendingTpLineName, tp, Color.DodgerBlue, 2, LineStyle.Dots);
+                Chart.DrawText(PendingTpTextName, "TP", lastBarTime, tp, Color.DodgerBlue).VerticalAlignment = VerticalAlignment.Bottom;
+            }
         }
 
         private void ClearLiquidityDrawings()
         {
-            Chart.RemoveObject(LiqHighLineName);
-            Chart.RemoveObject(LiqLowLineName);
+            for (int i = 0; i < MaxLiquidityLevelsToDraw; i++)
+            {
+                Chart.RemoveObject(LiqHighLineName + i);
+                Chart.RemoveObject(LiqLowLineName + i);
+                Chart.RemoveObject(LiqHighTextName + i);
+                Chart.RemoveObject(LiqLowTextName + i);
+            }
         }
 
         private void ClearBosAndFvgDrawings()
@@ -1222,6 +1311,11 @@ namespace cAlgo.Robots
             Chart.RemoveObject(BosSwingLineName);
             Chart.RemoveObject(FvgRectName);
             Chart.RemoveObject(M1BosConfirmationLineName);
+            Chart.RemoveObject(SweepLineName);
+            Chart.RemoveObject(BosLevelTextName);
+            Chart.RemoveObject(FvgTextName);
+            Chart.RemoveObject(SweepTextName);
+            Chart.RemoveObject(M1BosConfirmationTextName);
         }
 
         private void ClearPendingOrderLines()
@@ -1229,6 +1323,9 @@ namespace cAlgo.Robots
             Chart.RemoveObject(PendingEntryLineName);
             Chart.RemoveObject(PendingSlLineName);
             Chart.RemoveObject(PendingTpLineName);
+            Chart.RemoveObject(PendingEntryTextName);
+            Chart.RemoveObject(PendingSlTextName);
+            Chart.RemoveObject(PendingTpTextName);
         }
 
         private void ClearAllStrategyDrawings()
@@ -1241,6 +1338,7 @@ namespace cAlgo.Robots
         private void DrawM1BosConfirmationLine(DateTime bosConfirmationBarTimeNY, SweepType originalSweepDirection)
         {
             Chart.RemoveObject(M1BosConfirmationLineName); // Remove previous one, if any
+            Chart.RemoveObject(M1BosConfirmationTextName);
             DateTime serverTime = TimeZoneInfo.ConvertTime(bosConfirmationBarTimeNY, _newYorkTimeZone, TimeZone);
             Color lineColor;
             // The color depends on the direction of the BOS, which is opposite to the initial sweep for the swing identification,
@@ -1254,6 +1352,29 @@ namespace cAlgo.Robots
                 lineColor = Color.DarkRed;
             }
             Chart.DrawVerticalLine(M1BosConfirmationLineName, serverTime, lineColor, 2, LineStyle.Solid);
+            var text = originalSweepDirection == SweepType.LowSwept ? "Bull BOS" : "Bear BOS";
+            Chart.DrawText(M1BosConfirmationTextName, text, serverTime, Chart.TopY, lineColor).VerticalAlignment = VerticalAlignment.Top;
+        }
+
+        private void DrawSweepLine(DateTime startTimeNY, double startPrice, DateTime endTimeNY, double endPrice)
+        {
+            Chart.RemoveObject(SweepLineName);
+            Chart.RemoveObject(SweepTextName);
+            
+            if (startTimeNY == DateTime.MinValue || endTimeNY == DateTime.MinValue) return;
+
+            // To make the line visually connect to the body of the sweep candle, let's adjust the end time
+            TimeSpan executionBarDuration = GetTimeFrameTimeSpan(_executionTimeFrame);
+            DateTime effectiveEndTimeNY = endTimeNY.Add(executionBarDuration / 2); // Center of the candle
+
+            DateTime startTimeServer = TimeZoneInfo.ConvertTime(startTimeNY, _newYorkTimeZone, TimeZone);
+            DateTime endTimeServer = TimeZoneInfo.ConvertTime(effectiveEndTimeNY, _newYorkTimeZone, TimeZone);
+
+            Chart.DrawTrendLine(SweepLineName, startTimeServer, startPrice, endTimeServer, endPrice, Color.Black, 1, LineStyle.Dots);
+            // Place text in the middle of the line
+            var midTime = startTimeServer.AddTicks((endTimeServer.Ticks - startTimeServer.Ticks) / 2);
+            var midPrice = startPrice + (endPrice - startPrice) / 2;
+            Chart.DrawText(SweepTextName, "Sweep", midTime, midPrice, Color.Black).VerticalAlignment = VerticalAlignment.Bottom;
         }
 
         private void ResetSweepAndBosState(string reason)

@@ -243,7 +243,7 @@ namespace cAlgo.Robots
             Positions.Opened -= OnPositionOpened;
             Positions.Closed -= OnPositionClosed;
 
-            ClearAllStrategyDrawings();
+            // ClearAllStrategyDrawings(); // Keep drawings on chart for analysis after backtest
         }
 
         private DateTime GetNewYorkTime(DateTime serverTime)
@@ -410,14 +410,6 @@ namespace cAlgo.Robots
             var executionBars = MarketData.GetBars(_executionTimeFrame);
             if (executionBars.Count == 0) return;
             var lastBar = executionBars.Last();
-
-            // --- TEMPORARY DEBUG LOGGING for Session 3 ---
-            var sessionInfo = GetCurrentSessionInfo(currentTimeNY);
-            if (sessionInfo.SessionNumber == 3 && _currentLiquidityHigh != 0)
-            {
-                Print($"DEBUG S3 | T:{currentTimeNY:HH:mm:ss.fff} | LiqH:{_currentLiquidityHigh} | barH:{lastBar.High} | Ask:{Symbol.Ask}");
-            }
-            // --- END TEMPORARY DEBUG LOGGING ---
 
             double currentAsk = Symbol.Ask;
             double currentBid = Symbol.Bid;

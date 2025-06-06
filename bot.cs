@@ -46,7 +46,7 @@ namespace cAlgo.Robots
         [Parameter("Minutes Before Session for Liquidity", DefaultValue = 10, MinValue = 1, Group = "Session Timing")]
         public int MinutesBeforeSessionForLiquidity { get; set; }
 
-        [Parameter("Swing Lookback Period", DefaultValue = 60, MinValue = 10, Group = "Strategy Parameters")]
+        [Parameter("Swing Lookback Period", DefaultValue = 180, MinValue = 30, Group = "Strategy Parameters")]
         public int SwingLookbackPeriod { get; set; }
 
         [Parameter("Swing Candles", DefaultValue = 1, MinValue = 1, MaxValue = 3, Group = "Strategy Parameters")]
@@ -73,7 +73,6 @@ namespace cAlgo.Robots
         
         private double _currentLiquidityHigh;
         private double _currentLiquidityLow;
-        private DateTime _currentLiquiditySourceBarTimeNY;
         private DateTime _lastDateProcessedForSessionTimes = DateTime.MinValue;
 
         private SweepType _lastSweepType = SweepType.None;
@@ -98,6 +97,8 @@ namespace cAlgo.Robots
         private DateTime _lastDailyResetTimeNY = DateTime.MinValue;
 
         private TimeSpan _contextTimeFrameTimeSpan; // To help with FVG rect drawing duration
+
+        private bool _isProcessingSetup = false; // Flag to prevent re-triggering on the same setup
 
         private struct SessionInfo
         {
@@ -172,8 +173,8 @@ namespace cAlgo.Robots
 
             DailyResetAndSessionTimeUpdate(currentTimeNY);
 
-            // Visualize M1 sweeps (if enabled and during session)
-            // VisualizeM1Sweeps();
+            // Do not process anything new if we are already handling a setup
+            if (_isProcessingSetup) return;
 
             SessionInfo currentSession = GetCurrentSessionInfo(currentTimeNY);
 
@@ -360,35 +361,35 @@ namespace cAlgo.Robots
             }
 
             int startIndex = Math.Max(0, endIndex - SwingLookbackPeriod);
-            double recentSwingHigh = 0;
-            double recentSwingLow = 0;
+            double highestSwingHigh = 0;
+            double lowestSwingLow = double.MaxValue;
             DateTime swingHighTime = DateTime.MinValue;
             DateTime swingLowTime = DateTime.MinValue;
 
-            // Find the most recent swing high
+            // Find the highest swing high and lowest swing low in the lookback period
             for (int i = endIndex; i >= startIndex; i--)
             {
                 if (IsSwingHigh(i, contextBars, SwingCandles))
                 {
-                    recentSwingHigh = contextBars.HighPrices[i];
-                    swingHighTime = GetNewYorkTime(contextBars.OpenTimes[i]);
-                    break;
+                    if(contextBars.HighPrices[i] > highestSwingHigh)
+                    {
+                        highestSwingHigh = contextBars.HighPrices[i];
+                        swingHighTime = GetNewYorkTime(contextBars.OpenTimes[i]);
+                    }
                 }
-            }
 
-            // Find the most recent swing low
-            for (int i = endIndex; i >= startIndex; i--)
-            {
                 if (IsSwingLow(i, contextBars, SwingCandles))
                 {
-                    recentSwingLow = contextBars.LowPrices[i];
-                    swingLowTime = GetNewYorkTime(contextBars.OpenTimes[i]);
-                    break;
+                    if(contextBars.LowPrices[i] < lowestSwingLow)
+                    {
+                        lowestSwingLow = contextBars.LowPrices[i];
+                        swingLowTime = GetNewYorkTime(contextBars.OpenTimes[i]);
+                    }
                 }
             }
             
-            _currentLiquidityHigh = recentSwingHigh;
-            _currentLiquidityLow = recentSwingLow;
+            _currentLiquidityHigh = highestSwingHigh;
+            _currentLiquidityLow = (lowestSwingLow == double.MaxValue) ? 0 : lowestSwingLow;
 
             if (_currentLiquidityHigh != 0 || _currentLiquidityLow != 0)
             {
@@ -406,19 +407,31 @@ namespace cAlgo.Robots
         {
             if ((_currentLiquidityHigh == 0 && _currentLiquidityLow == 0) || _lastSweepType != SweepType.None) return;
 
+            var executionBars = MarketData.GetBars(_executionTimeFrame);
+            if (executionBars.Count == 0) return;
+            var lastBar = executionBars.Last();
+
+            // --- TEMPORARY DEBUG LOGGING for Session 3 ---
+            var sessionInfo = GetCurrentSessionInfo(currentTimeNY);
+            if (sessionInfo.SessionNumber == 3 && _currentLiquidityHigh != 0)
+            {
+                Print($"DEBUG S3 | T:{currentTimeNY:HH:mm:ss.fff} | LiqH:{_currentLiquidityHigh} | barH:{lastBar.High} | Ask:{Symbol.Ask}");
+            }
+            // --- END TEMPORARY DEBUG LOGGING ---
+
             double currentAsk = Symbol.Ask;
             double currentBid = Symbol.Bid;
             SweepType detectedSweepThisTick = SweepType.None;
 
-            if (_currentLiquidityHigh != 0 && currentAsk > _currentLiquidityHigh)
+            if (_currentLiquidityHigh != 0 && (lastBar.High > _currentLiquidityHigh || currentAsk > _currentLiquidityHigh))
             {
-                Print($"HIGH LIQUIDITY SWEPT at {_currentLiquidityHigh}. Price: {currentAsk}, Time: {currentTimeNY:HH:mm:ss} NY");
+                Print($"HIGH LIQUIDITY SWEPT at {_currentLiquidityHigh}. Price: {Math.Max(lastBar.High, currentAsk)}, Time: {currentTimeNY:HH:mm:ss} NY");
                 detectedSweepThisTick = SweepType.HighSwept;
                 _lastSweptLiquidityLevel = _currentLiquidityHigh;
             }
-            else if (_currentLiquidityLow != 0 && currentBid < _currentLiquidityLow)
+            else if (_currentLiquidityLow != 0 && (lastBar.Low < _currentLiquidityLow || currentBid < _currentLiquidityLow))
             {
-                Print($"LOW LIQUIDITY SWEPT at {_currentLiquidityLow}. Price: {currentBid}, Time: {currentTimeNY:HH:mm:ss} NY");
+                Print($"LOW LIQUIDITY SWEPT at {_currentLiquidityLow}. Price: {Math.Min(lastBar.Low, currentBid)}, Time: {currentTimeNY:HH:mm:ss} NY");
                 detectedSweepThisTick = SweepType.LowSwept;
                 _lastSweptLiquidityLevel = _currentLiquidityLow;
             }
@@ -431,7 +444,6 @@ namespace cAlgo.Robots
                 _currentLiquidityHigh = 0; 
                 _currentLiquidityLow = 0;
 
-                var executionBars = MarketData.GetBars(_executionTimeFrame);
                 if (executionBars.Count > 0)
                 {
                     // The sweep happens on the currently forming bar
@@ -574,31 +586,18 @@ namespace cAlgo.Robots
             var executionBars = MarketData.GetBars(_executionTimeFrame);
             if (executionBars.Count < SwingCandles * 2 + 1) // Need enough bars for FVG and BOS checks
             {
-                Print($"CheckForBOSAndFVG: Not enough bars on {_executionTimeFrame} ({executionBars.Count}) to proceed.");
+                // Not enough bars to proceed, but don't reset state yet, maybe more bars will load.
                 return;
             }
 
             DateTime sweepBarTimeUtc = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZoneInfo.Utc);
             // Find the execution bar index that is at or after the M1 sweep bar's open time
             int firstBarToCheckForBOSIndexOnExecutionTF = executionBars.OpenTimes.GetIndexByTime(sweepBarTimeUtc);
-            if (firstBarToCheckForBOSIndexOnExecutionTF < 0) {
-                // If exact time not found, try next available bar
-                for(int i = 0; i < executionBars.Count; i++)
-                {
-                    if (executionBars.OpenTimes[i] >= sweepBarTimeUtc)
-                    {
-                        firstBarToCheckForBOSIndexOnExecutionTF = i;
-                        break;
-                    }
-                }
-                if (firstBarToCheckForBOSIndexOnExecutionTF < 0)
-                {
-                    Print($"Error finding execution bar index in CheckForBOSAndFVG for sweep bar time: {_sweepBarTimeNY:yyyy-MM-dd HH:mm} (UTC: {sweepBarTimeUtc}). Resetting.");
-                    _lastSweepType = SweepType.None;
-                    _relevantSwingLevelForBOS = 0;
-                    ClearBosAndFvgDrawings();
-                    return;
-                }
+            if (firstBarToCheckForBOSIndexOnExecutionTF < 0)
+            {
+                Print($"Error finding execution bar index in CheckForBOSAndFVG for sweep bar time: {_sweepBarTimeNY:yyyy-MM-dd HH:mm} (UTC: {sweepBarTimeUtc}). Resetting.");
+                ResetSweepAndBosState("Execution bar index not found for sweep time.");
+                return;
             }
             
             // Loop for BOS candidate bar on execution timeframe (e.g., M1)
@@ -631,49 +630,38 @@ namespace cAlgo.Robots
 
                 if (bosConfirmedThisBar)
                 {
+                    _isProcessingSetup = true; // Lock the bot to process this one setup.
+
                     if (EntryStrategy == EntryStrategyType.OnBOS)
                     {
                         Print($"BOS confirmed at {_bosTimeNY:HH:mm}, preparing order based on {EntryStrategy} strategy.");
                         PrepareAndPlaceBOSEntryOrder(_lastSweepType);
-                        _bosLevel = 0;
-                        _relevantSwingLevelForBOS = 0;
-                        return; // Done with this setup
+                        return; // Exit. The order function is now responsible for state.
                     }
                     else // EntryStrategyType.OnFVG
                     {
                         Print($"BOS confirmed at {_bosTimeNY:HH:mm}, now searching for FVG based on {EntryStrategy} strategy.");
-                        // Now search for FVG on execution TF (e.g. M1)
-                        // from bosCandidateBarIndex down to firstBarToCheckForBOSIndexOnExecutionTF (M1 bar corresponding to sweep bar)
+                        
+                        bool fvgSetupFoundAndProcessing = false;
                         for (int fvgSearchIndex = bosCandidateBarIndex; fvgSearchIndex >= firstBarToCheckForBOSIndexOnExecutionTF; fvgSearchIndex--)
                         {
-                            // Ensure we have enough bars for FVG (N, N+1, N+2 pattern means fvgSearchIndex (N+1 bar) must be at least index 1 for N-1)
-                            // So, N-1 index is fvgSearchIndex - 1. N+1 index is fvgSearchIndex. N+2 index is fvgSearchIndex + 1
-                            // This means index for N-1 (first bar of pattern) is fvgSearchIndex -1.
-                            // Index for N+1 (middle bar) is fvgSearchIndex.
-                            // Index for N+2 (last bar of pattern) is fvgSearchIndex + 1.
-                            // The FVG is between bar (fvgSearchIndex-1) and bar (fvgSearchIndex+1)
-                            // The 'series' passed to FindBullish/BearishFVG expects the index of the N+1 bar.
                             if (fvgSearchIndex < 1 || fvgSearchIndex + 1 >= executionBars.Count) continue;
 
                             double fvgLowBoundary, fvgHighBoundary;
-                            bool fvgFound = false;
+                            bool fvgFoundThisIteration = false;
 
                             if (_lastSweepType == SweepType.HighSwept) // Bearish BOS, look for Bearish FVG
                             {
-                                // Pass fvgSearchIndex (which is N+1 bar) to FindBearishFVG
                                 if (FindBearishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
                                 {
                                     Print($"Bearish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
                                     _lastFvgDetermined_Low = fvgLowBoundary;
                                     _lastFvgDetermined_High = fvgHighBoundary;
-                                    // Store details of the N (fvgSearchIndex-1) and N+2 (fvgSearchIndex+1) bars of the FVG pattern on Execution TF
                                     _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
                                     _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
-                                    // Drawing FVG rectangle - using execution TF bar times.
-                                    // The GetTimeFrameTimeSpan used by DrawFvgRectangle should ideally be for _executionTimeFrame
                                     DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);                                
                                     PrepareAndPlaceFVGEntryOrder(SweepType.HighSwept); 
-                                    fvgFound = true;
+                                    fvgFoundThisIteration = true;
                                 }
                             }
                             else // Bullish BOS, look for Bullish FVG
@@ -687,25 +675,23 @@ namespace cAlgo.Robots
                                     _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
                                     DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);
                                     PrepareAndPlaceFVGEntryOrder(SweepType.LowSwept); 
-                                    fvgFound = true;
+                                    fvgFoundThisIteration = true;
                                 }
                             }
 
-                            if (fvgFound)
+                            if (fvgFoundThisIteration)
                             {
-                                _bosLevel = 0; 
-                                _relevantSwingLevelForBOS = 0;
-                                return; 
+                                fvgSetupFoundAndProcessing = true;
+                                break; // Exit FVG search loop once one is found and processed
                             }
                         }
-                        Print($"BOS confirmed on {_executionTimeFrame} at {_bosTimeNY:yyyy-MM-dd HH:mm} NY, but NO FVG found in range from sweep bar to BOS bar on {_executionTimeFrame}. Resetting.");
-                        _lastSweepType = SweepType.None; 
-                        _relevantSwingLevelForBOS = 0;
-                        _sweepBarTimeNY = DateTime.MinValue;
-                        _sweepBarHigh = 0;
-                        _sweepBarLow = 0;
-                        ClearBosAndFvgDrawings();
-                        return;
+
+                        if (!fvgSetupFoundAndProcessing)
+                        {
+                             Print($"BOS confirmed on {_executionTimeFrame} at {_bosTimeNY:yyyy-MM-dd HH:mm} NY, but NO FVG found in range from sweep bar to BOS bar on {_executionTimeFrame}. Resetting.");
+                             ResetSweepAndBosState(""); // Quiet reset, this will also unlock the bot.
+                        }
+                        return; // Exit after first BOS confirmation is processed.
                     }
                 }
             }
@@ -1054,10 +1040,8 @@ namespace cAlgo.Robots
             {
                 _currentPendingOrderLabel = null;
                 ClearPendingOrderLines();
-                ClearBosAndFvgDrawings(); // If order cancelled, assume setup is invalid
-                _lastSweepType = SweepType.None; // Reset state to allow new sweep detection
-                _relevantSwingLevelForBOS = 0;
-                _sweepBarTimeNY = DateTime.MinValue;
+                // If an order we placed is cancelled, we should be free to look for a new setup.
+                ResetSweepAndBosState($"Pending order {args.PendingOrder.Label} cancelled, resetting state.");
             }
         }
 
@@ -1066,6 +1050,9 @@ namespace cAlgo.Robots
             Print($"Position {args.Position.Id} opened (Symbol: {args.Position.SymbolName}, Type: {args.Position.TradeType}, Volume: {args.Position.VolumeInUnits}, Entry: {args.Position.EntryPrice}, SL: {args.Position.StopLoss}, TP: {args.Position.TakeProfit}).");
             _tradesTakenToday++;
             Print($"Trade count for today: {_tradesTakenToday}.");
+            
+            // The setup is now complete. Reset all state to look for the next opportunity.
+            ResetSweepAndBosState($"Position {args.Position.Id} opened, resetting state for new search.");
         }
 
         private void OnPositionClosed(PositionClosedEventArgs args)
@@ -1129,6 +1116,13 @@ namespace cAlgo.Robots
                     }
                 }
             }
+
+            // Clear drawings
+            ClearBosAndFvgDrawings(); // Clears BosSwingLineName and FvgRectName
+            Chart.RemoveObject(M1BosConfirmationLineName);
+
+            // Crucially, unlock the bot to allow searching for new setups
+            _isProcessingSetup = false;
         }
 
         // Helper method to get TimeFrame duration in minutes
@@ -1147,7 +1141,7 @@ namespace cAlgo.Robots
             if (timeFrame == TimeFrame.Daily) return 1440;
             
             Print($"Warning: GetTimeFrameInMinutes does not have a specific case for {timeFrame}. Defaulting to 1 minute as a fallback.");
-            return 1; // Defaulting to 1 minute as a safer fallback than 15.
+            return 1; // Defaulting to 1 minute as a safer fallback.
         }
 
         // --- Chart Drawing Methods ---
@@ -1296,7 +1290,8 @@ namespace cAlgo.Robots
             ClearBosAndFvgDrawings(); // Clears BosSwingLineName and FvgRectName
             Chart.RemoveObject(M1BosConfirmationLineName);
             // Note: Liquidity lines (LiqHighLineName, LiqLowLineName) are managed by DailyReset or when new liquidity is identified.
-            // M3 Sweep visualization lines are managed by VisualizeM3Sweeps itself (cleared on each run).
+            // M1 Sweep visualization lines are managed by VisualizeM3Sweeps itself (cleared on each run).
+            _isProcessingSetup = false;
         }
 
         private double FindTakeProfitLevel(TradeType tradeType, double entryPrice, double stopLossPrice)
@@ -1398,3 +1393,4 @@ namespace cAlgo.Robots
         }
     }
 }
+

@@ -15,6 +15,12 @@ namespace cAlgo.Robots
         LowSwept
     }
 
+    public enum EntryStrategyType
+    {
+        OnFVG,
+        OnBOS
+    }
+
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class SilverBulletBot : Robot
     {
@@ -51,6 +57,9 @@ namespace cAlgo.Robots
 
         [Parameter("Max RR", DefaultValue = 4.0, Group = "Strategy Parameters")]
         public double MaxRiskRewardRatio { get; set; }
+
+        [Parameter("Entry Strategy", DefaultValue = EntryStrategyType.OnFVG, Group = "Strategy Parameters")]
+        public EntryStrategyType EntryStrategy { get; set; }
 
         // New York TimeZoneInfo
         private TimeZoneInfo _newYorkTimeZone;
@@ -622,70 +631,82 @@ namespace cAlgo.Robots
 
                 if (bosConfirmedThisBar)
                 {
-                    // Now search for FVG on execution TF (e.g. M1)
-                    // from bosCandidateBarIndex down to firstBarToCheckForBOSIndexOnExecutionTF (M1 bar corresponding to sweep bar)
-                    for (int fvgSearchIndex = bosCandidateBarIndex; fvgSearchIndex >= firstBarToCheckForBOSIndexOnExecutionTF; fvgSearchIndex--)
+                    if (EntryStrategy == EntryStrategyType.OnBOS)
                     {
-                        // Ensure we have enough bars for FVG (N, N+1, N+2 pattern means fvgSearchIndex (N+1 bar) must be at least index 1 for N-1)
-                        // So, N-1 index is fvgSearchIndex - 1. N+1 index is fvgSearchIndex. N+2 index is fvgSearchIndex + 1
-                        // This means index for N-1 (first bar of pattern) is fvgSearchIndex -1.
-                        // Index for N+1 (middle bar) is fvgSearchIndex.
-                        // Index for N+2 (last bar of pattern) is fvgSearchIndex + 1.
-                        // The FVG is between bar (fvgSearchIndex-1) and bar (fvgSearchIndex+1)
-                        // The 'series' passed to FindBullish/BearishFVG expects the index of the N+1 bar.
-                        if (fvgSearchIndex < 1 || fvgSearchIndex + 1 >= executionBars.Count) continue;
-
-                        double fvgLowBoundary, fvgHighBoundary;
-                        bool fvgFound = false;
-
-                        if (_lastSweepType == SweepType.HighSwept) // Bearish BOS, look for Bearish FVG
-                        {
-                            // Pass fvgSearchIndex (which is N+1 bar) to FindBearishFVG
-                            if (FindBearishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
-                            {
-                                Print($"Bearish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
-                                _lastFvgDetermined_Low = fvgLowBoundary;
-                                _lastFvgDetermined_High = fvgHighBoundary;
-                                // Store details of the N (fvgSearchIndex-1) and N+2 (fvgSearchIndex+1) bars of the FVG pattern on Execution TF
-                                _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
-                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
-                                // Drawing FVG rectangle - using execution TF bar times.
-                                // The GetTimeFrameTimeSpan used by DrawFvgRectangle should ideally be for _executionTimeFrame
-                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);                                
-                                PrepareAndPlaceFVGEntryOrder(SweepType.HighSwept); 
-                                fvgFound = true;
-                            }
-                        }
-                        else // Bullish BOS, look for Bullish FVG
-                        {
-                            if (FindBullishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
-                            {
-                                Print($"Bullish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
-                                _lastFvgDetermined_Low = fvgLowBoundary;
-                                _lastFvgDetermined_High = fvgHighBoundary;
-                                _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
-                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
-                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);
-                                PrepareAndPlaceFVGEntryOrder(SweepType.LowSwept); 
-                                fvgFound = true;
-                            }
-                        }
-
-                        if (fvgFound)
-                        {
-                            _bosLevel = 0; 
-                            _relevantSwingLevelForBOS = 0;
-                            return; 
-                        }
+                        Print($"BOS confirmed at {_bosTimeNY:HH:mm}, preparing order based on {EntryStrategy} strategy.");
+                        PrepareAndPlaceBOSEntryOrder(_lastSweepType);
+                        _bosLevel = 0;
+                        _relevantSwingLevelForBOS = 0;
+                        return; // Done with this setup
                     }
-                    Print($"BOS confirmed on {_executionTimeFrame} at {_bosTimeNY:yyyy-MM-dd HH:mm} NY, but NO FVG found in range from sweep bar to BOS bar on {_executionTimeFrame}. Resetting.");
-                    _lastSweepType = SweepType.None; 
-                    _relevantSwingLevelForBOS = 0;
-                    _sweepBarTimeNY = DateTime.MinValue;
-                    _sweepBarHigh = 0;
-                    _sweepBarLow = 0;
-                    ClearBosAndFvgDrawings();
-                    return;
+                    else // EntryStrategyType.OnFVG
+                    {
+                        Print($"BOS confirmed at {_bosTimeNY:HH:mm}, now searching for FVG based on {EntryStrategy} strategy.");
+                        // Now search for FVG on execution TF (e.g. M1)
+                        // from bosCandidateBarIndex down to firstBarToCheckForBOSIndexOnExecutionTF (M1 bar corresponding to sweep bar)
+                        for (int fvgSearchIndex = bosCandidateBarIndex; fvgSearchIndex >= firstBarToCheckForBOSIndexOnExecutionTF; fvgSearchIndex--)
+                        {
+                            // Ensure we have enough bars for FVG (N, N+1, N+2 pattern means fvgSearchIndex (N+1 bar) must be at least index 1 for N-1)
+                            // So, N-1 index is fvgSearchIndex - 1. N+1 index is fvgSearchIndex. N+2 index is fvgSearchIndex + 1
+                            // This means index for N-1 (first bar of pattern) is fvgSearchIndex -1.
+                            // Index for N+1 (middle bar) is fvgSearchIndex.
+                            // Index for N+2 (last bar of pattern) is fvgSearchIndex + 1.
+                            // The FVG is between bar (fvgSearchIndex-1) and bar (fvgSearchIndex+1)
+                            // The 'series' passed to FindBullish/BearishFVG expects the index of the N+1 bar.
+                            if (fvgSearchIndex < 1 || fvgSearchIndex + 1 >= executionBars.Count) continue;
+
+                            double fvgLowBoundary, fvgHighBoundary;
+                            bool fvgFound = false;
+
+                            if (_lastSweepType == SweepType.HighSwept) // Bearish BOS, look for Bearish FVG
+                            {
+                                // Pass fvgSearchIndex (which is N+1 bar) to FindBearishFVG
+                                if (FindBearishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
+                                {
+                                    Print($"Bearish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
+                                    _lastFvgDetermined_Low = fvgLowBoundary;
+                                    _lastFvgDetermined_High = fvgHighBoundary;
+                                    // Store details of the N (fvgSearchIndex-1) and N+2 (fvgSearchIndex+1) bars of the FVG pattern on Execution TF
+                                    _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
+                                    _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
+                                    // Drawing FVG rectangle - using execution TF bar times.
+                                    // The GetTimeFrameTimeSpan used by DrawFvgRectangle should ideally be for _executionTimeFrame
+                                    DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);                                
+                                    PrepareAndPlaceFVGEntryOrder(SweepType.HighSwept); 
+                                    fvgFound = true;
+                                }
+                            }
+                            else // Bullish BOS, look for Bullish FVG
+                            {
+                                if (FindBullishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
+                                {
+                                    Print($"Bullish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
+                                    _lastFvgDetermined_Low = fvgLowBoundary;
+                                    _lastFvgDetermined_High = fvgHighBoundary;
+                                    _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
+                                    _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
+                                    DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);
+                                    PrepareAndPlaceFVGEntryOrder(SweepType.LowSwept); 
+                                    fvgFound = true;
+                                }
+                            }
+
+                            if (fvgFound)
+                            {
+                                _bosLevel = 0; 
+                                _relevantSwingLevelForBOS = 0;
+                                return; 
+                            }
+                        }
+                        Print($"BOS confirmed on {_executionTimeFrame} at {_bosTimeNY:yyyy-MM-dd HH:mm} NY, but NO FVG found in range from sweep bar to BOS bar on {_executionTimeFrame}. Resetting.");
+                        _lastSweepType = SweepType.None; 
+                        _relevantSwingLevelForBOS = 0;
+                        _sweepBarTimeNY = DateTime.MinValue;
+                        _sweepBarHigh = 0;
+                        _sweepBarLow = 0;
+                        ClearBosAndFvgDrawings();
+                        return;
+                    }
                 }
             }
             
@@ -787,40 +808,27 @@ namespace cAlgo.Robots
             return normalizedVolume;
         }
 
-        private void PrepareAndPlaceFVGEntryOrder(SweepType bosDirection) // Removed fvgMiddleBarIndex and contextBars as FVG details are now global
+        private void PrepareAndPlaceFVGEntryOrder(SweepType bosDirection)
         {
             // Check daily trading limits before proceeding
             if (_tradesTakenToday >= 3)
             {
                 Print("Daily trade limit (3) reached. No more trades today.");
-                _lastSweepType = SweepType.None;
-                _relevantSwingLevelForBOS = 0;
-                _sweepBarTimeNY = DateTime.MinValue;
-                _sweepBarHigh = 0;
-                _sweepBarLow = 0;
-                ClearBosAndFvgDrawings();
+                ResetSweepAndBosState("Daily trade limit reached.");
                 return;
             }
 
             if (_dailyProfitTargetMet)
             {
                 Print("Daily profit target (>=1%) met. No more trades today.");
-                _lastSweepType = SweepType.None;
-                _relevantSwingLevelForBOS = 0;
-                _sweepBarTimeNY = DateTime.MinValue;
-                _sweepBarHigh = 0;
-                _sweepBarLow = 0;
-                ClearBosAndFvgDrawings();
+                ResetSweepAndBosState("Daily profit target met.");
                 return;
             }
 
             if (_sweepBarHigh == 0 || _sweepBarLow == 0)
             {
                 Print("Error: Sweep bar High/Low for SL not set. Order not placed.");
-                // Reset state to avoid stuck logic
-                _lastSweepType = SweepType.None; 
-                _relevantSwingLevelForBOS = 0;
-                _sweepBarTimeNY = DateTime.MinValue;
+                ResetSweepAndBosState("Sweep bar details missing for FVG entry.");
                 return;
             }
 
@@ -831,7 +839,7 @@ namespace cAlgo.Robots
                 {
                     CancelPendingOrderAsync(existingOrder, cr => 
                     {
-                        if (cr.IsSuccessful) Print($"Previous pending order {existingOrder.Label} cancelled.");
+                        if (cr.IsSuccessful) Print($"Previous pending order {existingOrder.Label} cancelled for new FVG entry.");
                         else Print($"Failed to cancel previous pending order {existingOrder.Label}: {cr.Error}");
                     });
                     _currentPendingOrderLabel = null; 
@@ -840,85 +848,190 @@ namespace cAlgo.Robots
 
             double entryPrice, stopLossPrice, takeProfitPrice;
             TradeType tradeType;
-            string newOrderLabel = $"SB_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
-            double stopLossBufferPips = Symbol.PipSize * 2; // 2 pips buffer
+            string newOrderLabel = $"SB_FVG_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
+            double stopLossBufferPips = Symbol.PipSize * 2; 
 
             if (bosDirection == SweepType.LowSwept) // Bullish BOS after LowSweep
             {
                 tradeType = TradeType.Buy;
                 entryPrice = _lastFvgDetermined_High; // Entry at the top of Bullish FVG
-                stopLossPrice = _sweepBarLow - stopLossBufferPips; // SL below the low of the M1 SWEEP bar
-                Print($"FVG Entry: {_lastFvgDetermined_High}, SL based on M1 Sweep Bar Low: {_sweepBarLow}");
+                stopLossPrice = _sweepBarLow - stopLossBufferPips; 
+                Print($"FVG Entry Logic: Buy Limit at top of Bullish FVG {_lastFvgDetermined_High}, SL based on M1 Sweep Bar Low: {_sweepBarLow}");
             }
             else // Bearish BOS after HighSwept
             {
                 tradeType = TradeType.Sell;
                 entryPrice = _lastFvgDetermined_Low; // Entry at the bottom of Bearish FVG
-                stopLossPrice = _sweepBarHigh + stopLossBufferPips; // SL above the high of the M1 SWEEP bar
-                Print($"FVG Entry: {_lastFvgDetermined_Low}, SL based on M1 Sweep Bar High: {_sweepBarHigh}");
+                stopLossPrice = _sweepBarHigh + stopLossBufferPips; 
+                Print($"FVG Entry Logic: Sell Limit at bottom of Bearish FVG {_lastFvgDetermined_Low}, SL based on M1 Sweep Bar High: {_sweepBarHigh}");
             }
 
             if ((tradeType == TradeType.Buy && entryPrice <= stopLossPrice) || (tradeType == TradeType.Sell && entryPrice >= stopLossPrice))
             {
-                Print($"Invalid SL/Entry: Entry {entryPrice}, SL {stopLossPrice} for {tradeType}. Order not placed.");
+                Print($"Invalid SL/Entry for FVG trade: Entry {entryPrice}, SL {stopLossPrice} for {tradeType}. Order not placed.");
+                ResetSweepAndBosState("Invalid SL/Entry for FVG entry.");
                 return;
             }
             
             double stopLossInPips = Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize;
             if (stopLossInPips <= 0.5) 
             {
-                Print($"Stop loss is too small ({stopLossInPips} pips based on sweep bar SL). Min SL: 0.5 pips. Order not placed.");
+                Print($"Stop loss is too small ({stopLossInPips} pips for FVG entry). Min SL: 0.5 pips. Order not placed.");
+                ResetSweepAndBosState("SL too small for FVG entry.");
                 return;
             }
-
-            // --- Dynamic Take Profit ---
+            
             takeProfitPrice = FindTakeProfitLevel(tradeType, entryPrice, stopLossPrice);
             if (takeProfitPrice == 0)
             {
-                Print($"No suitable Take Profit target found meeting Min RR >= {MinRiskRewardRatio}. Order not placed.");
-                ResetSweepAndBosState("Order cancelled due to no valid TP target.");
+                Print($"No suitable Take Profit target found meeting Min RR >= {MinRiskRewardRatio} for FVG entry. Order not placed.");
+                ResetSweepAndBosState("Order cancelled due to no valid TP target for FVG entry.");
                 return;
             }
-            // --- End Dynamic Take Profit ---
             
             double volume = CalculateOrderVolume(stopLossInPips);
             if (volume == 0)
             {
-                Print("Calculated volume is zero. Order not placed.");
+                Print("Calculated volume is zero for FVG entry. Order not placed.");
+                ResetSweepAndBosState("Volume is zero for FVG entry.");
                 return;
             }
 
-            if (tradeType == TradeType.Buy && entryPrice >= Symbol.Ask)
+            if ((tradeType == TradeType.Buy && entryPrice >= Symbol.Ask) || (tradeType == TradeType.Sell && entryPrice <= Symbol.Bid))
             {
-                ResetSweepAndBosState($"Buy Limit entry {entryPrice} is at or above current Ask {Symbol.Ask}. Order not placed. Full state reset.");
-                return; 
-            }
-            if (tradeType == TradeType.Sell && entryPrice <= Symbol.Bid)
-            {
-                ResetSweepAndBosState($"Sell Limit entry {entryPrice} is at or below current Bid {Symbol.Bid}. Order not placed. Full state reset.");
+                Print($"FVG Limit entry {entryPrice} is on the wrong side of current market price. It would fill immediately. Order not placed to avoid slippage.");
+                ResetSweepAndBosState("FVG entry price already passed by market.");
                 return;
             }
 
-            Print($"Preparing to place {tradeType} Limit Order: Label={newOrderLabel}, Vol={volume}, Entry={Math.Round(entryPrice, Symbol.Digits)}, SL={Math.Round(stopLossPrice, Symbol.Digits)} ({stopLossInPips} pips), TP={Math.Round(takeProfitPrice, Symbol.Digits)}");
-
-            // Explicitly cast the 8th argument (null) to ProtectionType? to resolve ambiguity
+            Print($"Preparing to place {tradeType} Limit Order (FVG Strategy): Label={newOrderLabel}, Vol={volume}, Entry={Math.Round(entryPrice, Symbol.Digits)}, SL={Math.Round(stopLossPrice, Symbol.Digits)}, TP={Math.Round(takeProfitPrice, Symbol.Digits)}");
+            
             PlaceLimitOrderAsync(tradeType, SymbolName, volume, entryPrice, newOrderLabel, stopLossPrice, takeProfitPrice, (ProtectionType?)null, tradeResult =>
             {
                 if (tradeResult.IsSuccessful)
                 {
-                    Print($"Successfully placed pending order {newOrderLabel}. Position ID (if filled immediately): {tradeResult.Position?.Id}, Pending Order ID: {tradeResult.PendingOrder?.Id}");
+                    Print($"Successfully placed pending order (FVG) {newOrderLabel}.");
                     DrawPendingOrderLines(entryPrice, stopLossPrice, takeProfitPrice);
                     _currentPendingOrderLabel = newOrderLabel;
                 }
                 else
                 {
-                    Print($"Failed to place pending order {newOrderLabel}: {tradeResult.Error}. Clearing related drawings.");
-                    ClearBosAndFvgDrawings(); // Also clear FVG if order placement failed
-                    _lastSweepType = SweepType.None;
-                    _relevantSwingLevelForBOS = 0;
-                    _sweepBarTimeNY = DateTime.MinValue;
-                    _sweepBarHigh = 0;
-                    _sweepBarLow = 0;
+                    Print($"Failed to place pending order (FVG) {newOrderLabel}: {tradeResult.Error}.");
+                    ResetSweepAndBosState($"Failed to place FVG order: {tradeResult.Error}");
+                }
+            });
+        }
+
+        private void PrepareAndPlaceBOSEntryOrder(SweepType bosDirection)
+        {
+            // Check daily trading limits before proceeding
+            if (_tradesTakenToday >= 3)
+            {
+                Print("Daily trade limit (3) reached. No more trades today.");
+                ResetSweepAndBosState("Daily trade limit reached.");
+                return;
+            }
+
+            if (_dailyProfitTargetMet)
+            {
+                Print("Daily profit target (>=1%) met. No more trades today.");
+                ResetSweepAndBosState("Daily profit target met.");
+                return;
+            }
+
+            if (_sweepBarHigh == 0 || _sweepBarLow == 0)
+            {
+                Print("Error: Sweep bar High/Low for SL not set. Order not placed.");
+                ResetSweepAndBosState("Sweep bar details missing for BOS entry.");
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(_currentPendingOrderLabel))
+            {
+                var existingOrder = PendingOrders.FirstOrDefault(o => o.Label == _currentPendingOrderLabel);
+                if (existingOrder != null)
+                {
+                    CancelPendingOrderAsync(existingOrder, cr => 
+                    {
+                        if (cr.IsSuccessful) Print($"Previous pending order {existingOrder.Label} cancelled for new BOS entry.");
+                        else Print($"Failed to cancel previous pending order {existingOrder.Label}: {cr.Error}");
+                    });
+                    _currentPendingOrderLabel = null; 
+                }
+            }
+
+            double entryPrice, stopLossPrice, takeProfitPrice;
+            TradeType tradeType;
+            string newOrderLabel = $"SB_BOS_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
+            double stopLossBufferPips = Symbol.PipSize * 2; 
+
+            if (bosDirection == SweepType.LowSwept) // Bullish BOS after LowSweep
+            {
+                tradeType = TradeType.Buy;
+                entryPrice = _relevantSwingLevelForBOS; // Entry at the broken swing high level
+                stopLossPrice = _sweepBarLow - stopLossBufferPips; 
+                Print($"BOS Entry Logic: Buy Limit at broken swing {_relevantSwingLevelForBOS}, SL based on M1 Sweep Bar Low: {_sweepBarLow}");
+            }
+            else // Bearish BOS after HighSwept
+            {
+                tradeType = TradeType.Sell;
+                entryPrice = _relevantSwingLevelForBOS; // Entry at the broken swing low level
+                stopLossPrice = _sweepBarHigh + stopLossBufferPips; 
+                Print($"BOS Entry Logic: Sell Limit at broken swing {_relevantSwingLevelForBOS}, SL based on M1 Sweep Bar High: {_sweepBarHigh}");
+            }
+
+            if ((tradeType == TradeType.Buy && entryPrice <= stopLossPrice) || (tradeType == TradeType.Sell && entryPrice >= stopLossPrice))
+            {
+                Print($"Invalid SL/Entry for BOS trade: Entry {entryPrice}, SL {stopLossPrice} for {tradeType}. Order not placed.");
+                ResetSweepAndBosState("Invalid SL/Entry for BOS entry.");
+                return;
+            }
+            
+            double stopLossInPips = Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize;
+            if (stopLossInPips <= 0.5) 
+            {
+                Print($"Stop loss is too small ({stopLossInPips} pips for BOS entry). Min SL: 0.5 pips. Order not placed.");
+                ResetSweepAndBosState("SL too small for BOS entry.");
+                return;
+            }
+            
+            takeProfitPrice = FindTakeProfitLevel(tradeType, entryPrice, stopLossPrice);
+            if (takeProfitPrice == 0)
+            {
+                Print($"No suitable Take Profit target found meeting Min RR >= {MinRiskRewardRatio} for BOS entry. Order not placed.");
+                ResetSweepAndBosState("Order cancelled due to no valid TP target for BOS entry.");
+                return;
+            }
+            
+            double volume = CalculateOrderVolume(stopLossInPips);
+            if (volume == 0)
+            {
+                Print("Calculated volume is zero for BOS entry. Order not placed.");
+                ResetSweepAndBosState("Volume is zero for BOS entry.");
+                return;
+            }
+
+            if ((tradeType == TradeType.Buy && entryPrice >= Symbol.Ask) || (tradeType == TradeType.Sell && entryPrice <= Symbol.Bid))
+            {
+                Print($"BOS Limit entry {entryPrice} is on the wrong side of current market price. It would fill immediately. Order not placed to avoid slippage.");
+                ResetSweepAndBosState("BOS entry price already passed by market.");
+                return;
+            }
+
+            Print($"Preparing to place {tradeType} Limit Order (BOS Strategy): Label={newOrderLabel}, Vol={volume}, Entry={Math.Round(entryPrice, Symbol.Digits)}, SL={Math.Round(stopLossPrice, Symbol.Digits)}, TP={Math.Round(takeProfitPrice, Symbol.Digits)}");
+            
+            PlaceLimitOrderAsync(tradeType, SymbolName, volume, entryPrice, newOrderLabel, stopLossPrice, takeProfitPrice, (ProtectionType?)null, tradeResult =>
+            {
+                if (tradeResult.IsSuccessful)
+                {
+                    Print($"Successfully placed pending order (BOS) {newOrderLabel}.");
+                    DrawPendingOrderLines(entryPrice, stopLossPrice, takeProfitPrice);
+                    _currentPendingOrderLabel = newOrderLabel;
+                }
+                else
+                {
+                    Print($"Failed to place pending order (BOS) {newOrderLabel}: {tradeResult.Error}.");
+                    ResetSweepAndBosState($"Failed to place BOS order: {tradeResult.Error}");
                 }
             });
         }

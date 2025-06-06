@@ -18,8 +18,8 @@ namespace cAlgo.Robots
 
     public enum EntryStrategyType
     {
-        OnFVG, // Rename and change to BOS_FVG_TEST
-        OnBOS // BOS (closed candle) -> enter market order
+        OnFVG,
+        OnBOS
     }
 
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
@@ -88,6 +88,7 @@ namespace cAlgo.Robots
         private List<Tuple<double, DateTime>> _liquidityHighs;
         private List<Tuple<double, DateTime>> _liquidityLows;
         private DateTime _lastDateProcessedForSessionTimes = DateTime.MinValue;
+        private List<Tuple<double, DateTime>> _tpTargetLiquidityLevels; // To store liquidity levels for TP targeting
 
         private SweepType _lastSweepType = SweepType.None;
         private double _lastSweptLiquidityLevel;
@@ -109,6 +110,9 @@ namespace cAlgo.Robots
         private DateTime _fvgBarN2_OpenTimeNY = DateTime.MinValue; // FVG Bar N+2 (third bar of 3-bar FVG pattern) OpenTime NY
         private string _currentPendingOrderLabel = null;
         private DateTime _lastDailyResetTimeNY = DateTime.MinValue;
+
+        // Dictionary to hold SL/TP info against a unique order label
+        private Dictionary<string, Tuple<double, double>> _pendingOrderInfo = new Dictionary<string, Tuple<double, double>>();
 
         private TimeSpan _contextTimeFrameTimeSpan; // To help with FVG rect drawing duration
 
@@ -146,6 +150,7 @@ namespace cAlgo.Robots
 
             _liquidityHighs = new List<Tuple<double, DateTime>>();
             _liquidityLows = new List<Tuple<double, DateTime>>();
+            _tpTargetLiquidityLevels = new List<Tuple<double, DateTime>>();
 
             try
             {
@@ -426,7 +431,7 @@ namespace cAlgo.Robots
 
             if (_liquidityHighs.Count > 0 || _liquidityLows.Count > 0)
             {
-                SetLiquidityIdentifiedFlag(sessionNumber, true);
+                 SetLiquidityIdentifiedFlag(sessionNumber, true);
                 Print($"Session {sessionNumber} ({sessionActualStartNY:HH:mm} NY): Liquidity identified. Found {_liquidityHighs.Count} Highs and {_liquidityLows.Count} Lows.");
                 DrawLiquidityLevels(_liquidityHighs, _liquidityLows, sessionActualStartNY);
             }
@@ -455,7 +460,7 @@ namespace cAlgo.Robots
                 if (lastBar.High > liqHigh.Item1 || currentAsk > liqHigh.Item1)
                 {
                     Print($"HIGH LIQUIDITY SWEPT at {liqHigh.Item1}. Price: {Math.Max(lastBar.High, currentAsk)}, Time: {currentTimeNY:HH:mm:ss} NY");
-                detectedSweepThisTick = SweepType.HighSwept;
+                    detectedSweepThisTick = SweepType.HighSwept;
                     _lastSweptLiquidityLevel = liqHigh.Item1;
                     sweptLevel = liqHigh;
                     break;
@@ -468,9 +473,9 @@ namespace cAlgo.Robots
                 foreach (var liqLow in _liquidityLows)
                 {
                     if (lastBar.Low < liqLow.Item1 || currentBid < liqLow.Item1)
-            {
+                    {
                         Print($"LOW LIQUIDITY SWEPT at {liqLow.Item1}. Price: {Math.Min(lastBar.Low, currentBid)}, Time: {currentTimeNY:HH:mm:ss} NY");
-                detectedSweepThisTick = SweepType.LowSwept;
+                        detectedSweepThisTick = SweepType.LowSwept;
                         _lastSweptLiquidityLevel = liqLow.Item1;
                         sweptLevel = liqLow;
                         break;
@@ -483,6 +488,17 @@ namespace cAlgo.Robots
             {
                 _lastSweepType = detectedSweepThisTick;
                 _timeOfLastSweepNY = currentTimeNY; // Tick time of sweep
+
+                if (detectedSweepThisTick == SweepType.HighSwept)
+                {
+                    _tpTargetLiquidityLevels = new List<Tuple<double, DateTime>>(_liquidityLows);
+                    Print($"Copied {_tpTargetLiquidityLevels.Count} liquidity lows for potential TP targets.");
+                }
+                else // LowSwept
+                {
+                    _tpTargetLiquidityLevels = new List<Tuple<double, DateTime>>(_liquidityHighs);
+                    Print($"Copied {_tpTargetLiquidityLevels.Count} liquidity highs for potential TP targets.");
+                }
                 
                 int sweepBarIndex = executionBars.Count - 1;
                 _sweepBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[sweepBarIndex]);
@@ -509,7 +525,7 @@ namespace cAlgo.Robots
         private bool IsSwingHigh(int barIndex, Bars series, int swingCandles = 1)
         {
             if (barIndex < swingCandles || barIndex >= series.Count - swingCandles)
-                return false; 
+                return false;
 
             double peakHigh = series.HighPrices[barIndex];
             double tolerance = Symbol.PipSize * 0.1; // 1/10th of a pip tolerance
@@ -528,7 +544,7 @@ namespace cAlgo.Robots
                 if (leftIndex < 0 || series.HighPrices[leftIndex] >= peakHigh - tolerance) // Must be clearly lower
                 {
                     return false;
-            }
+                }
             }
 
             // And check if the bars to the right of the original barIndex are all lower
@@ -546,7 +562,7 @@ namespace cAlgo.Robots
         private bool IsSwingLow(int barIndex, Bars series, int swingCandles = 1)
         {
             if (barIndex < swingCandles || barIndex >= series.Count - swingCandles)
-                return false; 
+                return false;
 
             double peakLow = series.LowPrices[barIndex];
             double tolerance = Symbol.PipSize * 0.1; // 1/10th of a pip tolerance
@@ -565,7 +581,7 @@ namespace cAlgo.Robots
                 if (leftIndex < 0 || series.LowPrices[leftIndex] <= peakLow + tolerance) // Must be clearly higher
                 {
                     return false;
-            }
+                }
             }
 
             // And check if the bars to the right of the original barIndex are all higher
@@ -678,11 +694,11 @@ namespace cAlgo.Robots
             DateTime sweepBarTimeUtc = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZoneInfo.Utc);
             // Find the execution bar index that is at or after the M1 sweep bar's open time
             int firstBarToCheckForBOSIndexOnExecutionTF = executionBars.OpenTimes.GetIndexByTime(sweepBarTimeUtc);
-                if (firstBarToCheckForBOSIndexOnExecutionTF < 0)
-                {
+            if (firstBarToCheckForBOSIndexOnExecutionTF < 0)
+            {
                 Print($"Error finding execution bar index in CheckForBOSAndFVG for sweep bar time: {_sweepBarTimeNY:yyyy-MM-dd HH:mm} (UTC: {sweepBarTimeUtc}). Resetting.");
                 ResetSweepAndBosState("Execution bar index not found for sweep time.");
-                    return;
+                return;
             }
             
             // Loop for BOS candidate bar on execution timeframe (e.g., M1)
@@ -982,6 +998,7 @@ namespace cAlgo.Robots
                 if (tradeResult.IsSuccessful)
                 {
                     Print($"Successfully placed pending order (FVG) {newOrderLabel}.");
+                    _pendingOrderInfo[newOrderLabel] = new Tuple<double, double>(stopLossPrice, takeProfitPrice);
                     DrawPendingOrderLines(entryPrice, stopLossPrice, takeProfitPrice);
                     _currentPendingOrderLabel = newOrderLabel;
             }
@@ -1096,6 +1113,7 @@ namespace cAlgo.Robots
                 if (tradeResult.IsSuccessful)
                 {
                     Print($"Successfully placed pending order (BOS) {newOrderLabel}.");
+                    _pendingOrderInfo[newOrderLabel] = new Tuple<double, double>(stopLossPrice, takeProfitPrice);
                     DrawPendingOrderLines(entryPrice, stopLossPrice, takeProfitPrice);
                     _currentPendingOrderLabel = newOrderLabel;
                 }
@@ -1109,24 +1127,65 @@ namespace cAlgo.Robots
 
         private void OnPendingOrderFilled(PendingOrderFilledEventArgs args)
         {
-            Print($"Pending order {args.PendingOrder.Label} filled and became position {args.Position.Id} (Symbol: {args.Position.SymbolName}, Type: {args.Position.TradeType}, Volume: {args.Position.VolumeInUnits}, Entry: {args.Position.EntryPrice}).");
-            if (args.PendingOrder.Label == _currentPendingOrderLabel)
+            var orderLabel = args.PendingOrder.Label;
+            Print($"Pending order {orderLabel} filled and became position {args.Position.Id} (Symbol: {args.Position.SymbolName}, Type: {args.Position.TradeType}, Volume: {args.Position.VolumeInUnits}, Entry: {args.Position.EntryPrice}).");
+
+            if (_pendingOrderInfo.TryGetValue(orderLabel, out var slTpInfo))
             {
-                _currentPendingOrderLabel = null; 
+                var position = args.Position;
+                var slPrice = slTpInfo.Item1;
+                var tpPrice = slTpInfo.Item2;
+
+                if (slPrice != 0)
+                {
+                    var slResult = position.ModifyStopLossPrice(slPrice);
+                    if (slResult.IsSuccessful)
+                    {
+                        Print($"Successfully modified SL for position {position.Id} to {slPrice}.");
+                    }
+                    else
+                    {
+                        Print($"Failed to modify SL for position {position.Id}: {slResult.Error}");
+                    }
+                }
+                if (tpPrice != 0)
+                {
+                    var tpResult = position.ModifyTakeProfitPrice(tpPrice);
+                    if (tpResult.IsSuccessful)
+                    {
+                        Print($"Successfully modified TP for position {position.Id} to {tpPrice}.");
+                    }
+                    else
+                    {
+                        Print($"Failed to modify TP for position {position.Id}: {tpResult.Error}");
+                    }
+                }
+                
+                _pendingOrderInfo.Remove(orderLabel);
+                if (orderLabel == _currentPendingOrderLabel)
+                {
+                    _currentPendingOrderLabel = null; 
+                }
                 ClearPendingOrderLines();
-                // FVG and BOS drawings remain until daily reset or next setup
+                ResetSweepAndBosState($"Position {position.Id} opened and modified from order {orderLabel}, resetting state.");
             }
         }
 
         private void OnPendingOrderCancelled(PendingOrderCancelledEventArgs args)
         {
             Print($"Pending order {args.PendingOrder.Label} was cancelled. Reason: {args.Reason}");
-            if (args.PendingOrder.Label == _currentPendingOrderLabel)
+            var orderLabel = args.PendingOrder.Label;
+
+            if (orderLabel == _currentPendingOrderLabel)
             {
                 _currentPendingOrderLabel = null;
                 ClearPendingOrderLines();
-                // If an order we placed is cancelled, we should be free to look for a new setup.
-                ResetSweepAndBosState($"Pending order {args.PendingOrder.Label} cancelled, resetting state.");
+                ResetSweepAndBosState($"Pending order {orderLabel} cancelled, resetting state.");
+            }
+            
+            if (_pendingOrderInfo.ContainsKey(orderLabel))
+            {
+                _pendingOrderInfo.Remove(orderLabel);
             }
         }
 
@@ -1136,8 +1195,7 @@ namespace cAlgo.Robots
             _tradesTakenToday++;
             Print($"Trade count for today: {_tradesTakenToday}.");
             
-            // The setup is now complete. Reset all state to look for the next opportunity.
-            ResetSweepAndBosState($"Position {args.Position.Id} opened, resetting state for new search.");
+            // Resetting state is now handled in OnPendingOrderFilled to avoid race conditions.
         }
 
         private void OnPositionClosed(PositionClosedEventArgs args)
@@ -1205,6 +1263,7 @@ namespace cAlgo.Robots
             // Clear drawings
             ClearBosAndFvgDrawings(); // Clears BosSwingLineName and FvgRectName
             Chart.RemoveObject(M1BosConfirmationLineName);
+            Chart.RemoveObject(M1BosConfirmationTextName);
 
             // Crucially, unlock the bot to allow searching for new setups
             _isProcessingSetup = false;
@@ -1439,6 +1498,8 @@ namespace cAlgo.Robots
             _fvgBarN_OpenTimeNY = DateTime.MinValue;
             _fvgBarN2_OpenTimeNY = DateTime.MinValue;
 
+            _tpTargetLiquidityLevels?.Clear();
+
             // Clear drawings
             ClearBosAndFvgDrawings(); // Clears BosSwingLineName and FvgRectName
             Chart.RemoveObject(M1BosConfirmationLineName);
@@ -1449,24 +1510,22 @@ namespace cAlgo.Robots
 
         private double FindTakeProfitLevel(TradeType tradeType, double entryPrice, double stopLossPrice)
         {
-            var series = MarketData.GetBars(_executionTimeFrame);
             double stopLossPips = Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize;
             if (stopLossPips <= 0) return 0; // Avoid division by zero
 
             double bestTarget = 0;
             double bestTargetRR = 0;
 
-            // Search backwards from the most recent completed bar for a suitable swing
-            // Let's look back a bit further to find a good swing, e.g. 5x the swing lookback period
-            int searchLookback = SwingLookbackPeriod * 5;
-            for (int i = series.Count - 2; i >= Math.Max(0, series.Count - 1 - searchLookback) ; i--)
+            if (_tpTargetLiquidityLevels != null && _tpTargetLiquidityLevels.Count > 0)
             {
-                if (tradeType == TradeType.Buy)
+                Print($"Searching for TP among {_tpTargetLiquidityLevels.Count} potential liquidity targets.");
+
+                foreach (var targetLevel in _tpTargetLiquidityLevels)
                 {
-                    // For a buy trade, we are looking for a swing high to target
-                    if (IsSwingHigh(i, series, SwingCandles))
+                    double potentialTarget = targetLevel.Item1;
+                    if (tradeType == TradeType.Buy)
                     {
-                        double potentialTarget = series.HighPrices[i];
+                        // For a buy trade, we are looking for a liquidity high to target
                         if (potentialTarget > entryPrice) // Must be above entry
                         {
                             double targetPips = (potentialTarget - entryPrice) / Symbol.PipSize;
@@ -1475,8 +1534,7 @@ namespace cAlgo.Robots
                             double currentRR = targetPips / stopLossPips;
                             if (currentRR >= MinRiskRewardRatio)
                             {
-                                // We found a valid target. Since we are iterating backwards in time, this is the most recent valid one.
-                                // We want the closest one in price, so we need to keep track of the minimum valid target.
+                                // We found a valid target. We want the closest one in price (lowest valid high).
                                 if (bestTarget == 0 || potentialTarget < bestTarget)
                                 {
                                     bestTarget = potentialTarget;
@@ -1485,13 +1543,9 @@ namespace cAlgo.Robots
                             }
                         }
                     }
-                }
-                else // Sell Trade
-                {
-                    // For a sell trade, we are looking for a swing low to target
-                    if (IsSwingLow(i, series, SwingCandles))
+                    else // Sell Trade
                     {
-                        double potentialTarget = series.LowPrices[i];
+                        // For a sell trade, we are looking for a liquidity low to target
                         if (potentialTarget < entryPrice) // Must be below entry
                         {
                             double targetPips = (entryPrice - potentialTarget) / Symbol.PipSize;
@@ -1500,7 +1554,7 @@ namespace cAlgo.Robots
                             double currentRR = targetPips / stopLossPips;
                             if (currentRR >= MinRiskRewardRatio)
                             {
-                                // Found a valid target. Keep track of the highest (closest to entry) valid one.
+                                // Found a valid target. We want the closest one in price (highest valid low).
                                 if (bestTarget == 0 || potentialTarget > bestTarget)
                                 {
                                     bestTarget = potentialTarget;
@@ -1514,8 +1568,8 @@ namespace cAlgo.Robots
 
             if (bestTarget != 0)
             {
-                // A valid swing target was found
-                Print($"Found a potential TP target at {bestTarget} with RR {bestTargetRR:F2}.");
+                // A valid liquidity target was found
+                Print($"Found a potential TP target at liquidity level {bestTarget} with RR {bestTargetRR:F2}.");
                 if (bestTargetRR > MaxRiskRewardRatio)
                 {
                     Print($"Calculated RR ({bestTargetRR:F2}) exceeds Max RR ({MaxRiskRewardRatio}). Capping TP.");
@@ -1528,12 +1582,12 @@ namespace cAlgo.Robots
                         return entryPrice - (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);
                     }
                 }
-                return bestTarget; // Use the found swing target
+                return bestTarget; // Use the found liquidity target
             }
             else
             {
-                // No suitable swing found, use default Max RR
-                Print($"No suitable swing target found meeting Min RR {MinRiskRewardRatio}. Using default Max RR {MaxRiskRewardRatio} for TP.");
+                // No suitable liquidity target found, use default Max RR
+                Print($"No suitable liquidity target found meeting Min RR {MinRiskRewardRatio}. Using default Max RR {MaxRiskRewardRatio} for TP.");
                  if (tradeType == TradeType.Buy)
                 {
                     return entryPrice + (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);
@@ -1541,10 +1595,10 @@ namespace cAlgo.Robots
                 else
                 {
                     return entryPrice - (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);
+                }
             }
         }
     }
-}
 }
 
 

@@ -18,8 +18,8 @@ namespace cAlgo.Robots
 
     public enum EntryStrategyType
     {
-        OnFVG,
-        OnBOS
+        OnFVG, // Rename and change to BOS_FVG_TEST
+        OnBOS // BOS (closed candle) -> enter market order
     }
 
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]

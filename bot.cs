@@ -18,8 +18,8 @@ namespace cAlgo.Robots
 
     public enum EntryStrategyType
     {
-        OnFVG,
-        OnBOS
+        OnFVG, // Rename and change to BOS_FVG_TEST
+        OnBOS // BOS (closed candle) -> enter market order
     }
 
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
@@ -426,7 +426,7 @@ namespace cAlgo.Robots
 
             if (_liquidityHighs.Count > 0 || _liquidityLows.Count > 0)
             {
-                 SetLiquidityIdentifiedFlag(sessionNumber, true);
+                SetLiquidityIdentifiedFlag(sessionNumber, true);
                 Print($"Session {sessionNumber} ({sessionActualStartNY:HH:mm} NY): Liquidity identified. Found {_liquidityHighs.Count} Highs and {_liquidityLows.Count} Lows.");
                 DrawLiquidityLevels(_liquidityHighs, _liquidityLows, sessionActualStartNY);
             }
@@ -455,7 +455,7 @@ namespace cAlgo.Robots
                 if (lastBar.High > liqHigh.Item1 || currentAsk > liqHigh.Item1)
                 {
                     Print($"HIGH LIQUIDITY SWEPT at {liqHigh.Item1}. Price: {Math.Max(lastBar.High, currentAsk)}, Time: {currentTimeNY:HH:mm:ss} NY");
-                    detectedSweepThisTick = SweepType.HighSwept;
+                detectedSweepThisTick = SweepType.HighSwept;
                     _lastSweptLiquidityLevel = liqHigh.Item1;
                     sweptLevel = liqHigh;
                     break;
@@ -468,9 +468,9 @@ namespace cAlgo.Robots
                 foreach (var liqLow in _liquidityLows)
                 {
                     if (lastBar.Low < liqLow.Item1 || currentBid < liqLow.Item1)
-                    {
+            {
                         Print($"LOW LIQUIDITY SWEPT at {liqLow.Item1}. Price: {Math.Min(lastBar.Low, currentBid)}, Time: {currentTimeNY:HH:mm:ss} NY");
-                        detectedSweepThisTick = SweepType.LowSwept;
+                detectedSweepThisTick = SweepType.LowSwept;
                         _lastSweptLiquidityLevel = liqLow.Item1;
                         sweptLevel = liqLow;
                         break;
@@ -492,7 +492,7 @@ namespace cAlgo.Robots
                 if (detectedSweepThisTick == SweepType.HighSwept)
                 {
                     DrawSweepLine(sweptLevel.Item2, _lastSweptLiquidityLevel, _sweepBarTimeNY, _sweepBarHigh);
-                }
+                    }
                 else // LowSwept
                 {
                     DrawSweepLine(sweptLevel.Item2, _lastSweptLiquidityLevel, _sweepBarTimeNY, _sweepBarLow);
@@ -509,7 +509,7 @@ namespace cAlgo.Robots
         private bool IsSwingHigh(int barIndex, Bars series, int swingCandles = 1)
         {
             if (barIndex < swingCandles || barIndex >= series.Count - swingCandles)
-                return false;
+                return false; 
 
             double peakHigh = series.HighPrices[barIndex];
             double tolerance = Symbol.PipSize * 0.1; // 1/10th of a pip tolerance
@@ -528,7 +528,7 @@ namespace cAlgo.Robots
                 if (leftIndex < 0 || series.HighPrices[leftIndex] >= peakHigh - tolerance) // Must be clearly lower
                 {
                     return false;
-                }
+            }
             }
 
             // And check if the bars to the right of the original barIndex are all lower
@@ -546,7 +546,7 @@ namespace cAlgo.Robots
         private bool IsSwingLow(int barIndex, Bars series, int swingCandles = 1)
         {
             if (barIndex < swingCandles || barIndex >= series.Count - swingCandles)
-                return false;
+                return false; 
 
             double peakLow = series.LowPrices[barIndex];
             double tolerance = Symbol.PipSize * 0.1; // 1/10th of a pip tolerance
@@ -565,7 +565,7 @@ namespace cAlgo.Robots
                 if (leftIndex < 0 || series.LowPrices[leftIndex] <= peakLow + tolerance) // Must be clearly higher
                 {
                     return false;
-                }
+            }
             }
 
             // And check if the bars to the right of the original barIndex are all higher
@@ -678,11 +678,11 @@ namespace cAlgo.Robots
             DateTime sweepBarTimeUtc = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZoneInfo.Utc);
             // Find the execution bar index that is at or after the M1 sweep bar's open time
             int firstBarToCheckForBOSIndexOnExecutionTF = executionBars.OpenTimes.GetIndexByTime(sweepBarTimeUtc);
-            if (firstBarToCheckForBOSIndexOnExecutionTF < 0)
-            {
+                if (firstBarToCheckForBOSIndexOnExecutionTF < 0)
+                {
                 Print($"Error finding execution bar index in CheckForBOSAndFVG for sweep bar time: {_sweepBarTimeNY:yyyy-MM-dd HH:mm} (UTC: {sweepBarTimeUtc}). Resetting.");
                 ResetSweepAndBosState("Execution bar index not found for sweep time.");
-                return;
+                    return;
             }
             
             // Loop for BOS candidate bar on execution timeframe (e.g., M1)
@@ -728,44 +728,44 @@ namespace cAlgo.Robots
                         Print($"BOS confirmed at {_bosTimeNY:HH:mm}, now searching for FVG based on {EntryStrategy} strategy.");
                         
                         bool fvgSetupFoundAndProcessing = false;
-                        for (int fvgSearchIndex = bosCandidateBarIndex; fvgSearchIndex >= firstBarToCheckForBOSIndexOnExecutionTF; fvgSearchIndex--)
-                        {
-                            if (fvgSearchIndex < 1 || fvgSearchIndex + 1 >= executionBars.Count) continue;
+                    for (int fvgSearchIndex = bosCandidateBarIndex; fvgSearchIndex >= firstBarToCheckForBOSIndexOnExecutionTF; fvgSearchIndex--)
+                    {
+                        if (fvgSearchIndex < 1 || fvgSearchIndex + 1 >= executionBars.Count) continue;
 
-                            double fvgLowBoundary, fvgHighBoundary;
+                        double fvgLowBoundary, fvgHighBoundary;
                             bool fvgFoundThisIteration = false;
 
-                            if (_lastSweepType == SweepType.HighSwept) // Bearish BOS, look for Bearish FVG
+                        if (_lastSweepType == SweepType.HighSwept) // Bearish BOS, look for Bearish FVG
+                        {
+                            if (FindBearishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
                             {
-                                if (FindBearishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
-                                {
-                                    Print($"Bearish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
-                                    _lastFvgDetermined_Low = fvgLowBoundary;
-                                    _lastFvgDetermined_High = fvgHighBoundary;
-                                    _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
-                                    _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
-                                    DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);                                
-                                    PrepareAndPlaceFVGEntryOrder(SweepType.HighSwept); 
+                                Print($"Bearish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
+                                _lastFvgDetermined_Low = fvgLowBoundary;
+                                _lastFvgDetermined_High = fvgHighBoundary;
+                                _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
+                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
+                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);                                
+                                PrepareAndPlaceFVGEntryOrder(SweepType.HighSwept); 
                                     fvgFoundThisIteration = true;
-                                }
                             }
-                            else // Bullish BOS, look for Bullish FVG
+                        }
+                        else // Bullish BOS, look for Bullish FVG
+                        {
+                            if (FindBullishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
                             {
-                                if (FindBullishFVG(fvgSearchIndex, executionBars, out fvgLowBoundary, out fvgHighBoundary))
-                                {
-                                    Print($"Bullish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
-                                    _lastFvgDetermined_Low = fvgLowBoundary;
-                                    _lastFvgDetermined_High = fvgHighBoundary;
-                                    _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
-                                    _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
-                                    DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);
-                                    PrepareAndPlaceFVGEntryOrder(SweepType.LowSwept); 
+                                Print($"Bullish FVG found on {_executionTimeFrame} based on bar {GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex]):yyyy-MM-dd HH:mm} NY. Range: {fvgLowBoundary}-{fvgHighBoundary}");
+                                _lastFvgDetermined_Low = fvgLowBoundary;
+                                _lastFvgDetermined_High = fvgHighBoundary;
+                                _fvgBarN_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex - 1]);
+                                _fvgBarN2_OpenTimeNY = GetNewYorkTime(executionBars.OpenTimes[fvgSearchIndex + 1]);
+                                DrawFvgRectangle(_fvgBarN_OpenTimeNY, _lastFvgDetermined_High, _fvgBarN2_OpenTimeNY, _lastFvgDetermined_Low, _executionTimeFrame);
+                                PrepareAndPlaceFVGEntryOrder(SweepType.LowSwept); 
                                     fvgFoundThisIteration = true;
-                                }
                             }
+                        }
 
                             if (fvgFoundThisIteration)
-                            {
+                        {
                                 fvgSetupFoundAndProcessing = true;
                                 break; // Exit FVG search loop once one is found and processed
                             }
@@ -959,7 +959,7 @@ namespace cAlgo.Robots
                 ResetSweepAndBosState("Order cancelled due to no valid TP target for FVG entry.");
                 return;
             }
-            
+
             double volume = CalculateOrderVolume(stopLossInPips);
             if (volume == 0)
             {
@@ -984,9 +984,9 @@ namespace cAlgo.Robots
                     Print($"Successfully placed pending order (FVG) {newOrderLabel}.");
                     DrawPendingOrderLines(entryPrice, stopLossPrice, takeProfitPrice);
                     _currentPendingOrderLabel = newOrderLabel;
-                }
-                else
-                {
+            }
+            else
+            {
                     Print($"Failed to place pending order (FVG) {newOrderLabel}: {tradeResult.Error}.");
                     ResetSweepAndBosState($"Failed to place FVG order: {tradeResult.Error}");
                 }
@@ -1000,7 +1000,7 @@ namespace cAlgo.Robots
             {
                 Print("Daily trade limit (3) reached. No more trades today.");
                 ResetSweepAndBosState("Daily trade limit reached.");
-                return;
+                return; 
             }
 
             if (_dailyProfitTargetMet)
@@ -1555,10 +1555,10 @@ namespace cAlgo.Robots
                 else
                 {
                     return entryPrice - (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);
-                }
             }
         }
     }
+}
 }
 
 

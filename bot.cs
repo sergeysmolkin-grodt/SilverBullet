@@ -394,7 +394,11 @@ namespace cAlgo.Robots
                 {
                     if (contextBars.HighPrices[i] > highestHighSince)
                     {
-                        _liquidityHighs.Add(new Tuple<double, DateTime>(contextBars.HighPrices[i], GetNewYorkTime(contextBars.OpenTimes[i])));
+                        var barTimeNY = GetNewYorkTime(contextBars.OpenTimes[i]);
+                        if ((sessionActualStartNY - barTimeNY).TotalMinutes >= MinutesBeforeSessionForLiquidity)
+                        {
+                            _liquidityHighs.Add(new Tuple<double, DateTime>(contextBars.HighPrices[i], barTimeNY));
+                        }
                     }
                 }
 
@@ -403,7 +407,11 @@ namespace cAlgo.Robots
                 {
                     if (contextBars.LowPrices[i] < lowestLowSince)
                     {
-                        _liquidityLows.Add(new Tuple<double, DateTime>(contextBars.LowPrices[i], GetNewYorkTime(contextBars.OpenTimes[i])));
+                        var barTimeNY = GetNewYorkTime(contextBars.OpenTimes[i]);
+                        if ((sessionActualStartNY - barTimeNY).TotalMinutes >= MinutesBeforeSessionForLiquidity)
+                        {
+                            _liquidityLows.Add(new Tuple<double, DateTime>(contextBars.LowPrices[i], barTimeNY));
+                        }
                     }
                 }
 
@@ -501,28 +509,74 @@ namespace cAlgo.Robots
         private bool IsSwingHigh(int barIndex, Bars series, int swingCandles = 1)
         {
             if (barIndex < swingCandles || barIndex >= series.Count - swingCandles)
-                return false; 
+                return false;
 
-            double centralHigh = series.HighPrices[barIndex];
+            double peakHigh = series.HighPrices[barIndex];
+            double tolerance = Symbol.PipSize * 0.1; // 1/10th of a pip tolerance
+
+            // Find the start of the plateau (j)
+            int plateauStartIndex = barIndex;
+            while (plateauStartIndex > 0 && Math.Abs(series.HighPrices[plateauStartIndex - 1] - peakHigh) < tolerance)
+            {
+                plateauStartIndex--;
+            }
+
+            // Now check if the bars to the left of the plateau are all lower
             for (int i = 1; i <= swingCandles; i++)
             {
-                if (series.HighPrices[barIndex - i] >= centralHigh || series.HighPrices[barIndex + i] >= centralHigh)
+                int leftIndex = plateauStartIndex - i;
+                if (leftIndex < 0 || series.HighPrices[leftIndex] >= peakHigh - tolerance) // Must be clearly lower
+                {
                     return false;
+                }
             }
+
+            // And check if the bars to the right of the original barIndex are all lower
+            for (int i = 1; i <= swingCandles; i++)
+            {
+                if (barIndex + i >= series.Count || series.HighPrices[barIndex + i] >= peakHigh - tolerance) // Must be clearly lower
+                {
+                    return false;
+                }
+            }
+
             return true;
         }
 
         private bool IsSwingLow(int barIndex, Bars series, int swingCandles = 1)
         {
             if (barIndex < swingCandles || barIndex >= series.Count - swingCandles)
-                return false; 
+                return false;
 
-            double centralLow = series.LowPrices[barIndex];
+            double peakLow = series.LowPrices[barIndex];
+            double tolerance = Symbol.PipSize * 0.1; // 1/10th of a pip tolerance
+
+            // Find the start of the plateau (j)
+            int plateauStartIndex = barIndex;
+            while (plateauStartIndex > 0 && Math.Abs(series.LowPrices[plateauStartIndex - 1] - peakLow) < tolerance)
+            {
+                plateauStartIndex--;
+            }
+
+            // Now check if the bars to the left of the plateau are all higher
             for (int i = 1; i <= swingCandles; i++)
             {
-                if (series.LowPrices[barIndex - i] <= centralLow || series.LowPrices[barIndex + i] <= centralLow)
+                int leftIndex = plateauStartIndex - i;
+                if (leftIndex < 0 || series.LowPrices[leftIndex] <= peakLow + tolerance) // Must be clearly higher
+                {
                     return false;
+                }
             }
+
+            // And check if the bars to the right of the original barIndex are all higher
+            for (int i = 1; i <= swingCandles; i++)
+            {
+                if (barIndex + i >= series.Count || series.LowPrices[barIndex + i] <= peakLow + tolerance) // Must be clearly higher
+                {
+                    return false;
+                }
+            }
+
             return true;
         }
 
@@ -1506,4 +1560,5 @@ namespace cAlgo.Robots
         }
     }
 }
+
 

@@ -15,13 +15,6 @@ namespace cAlgo.Robots
         LowSwept
     }
 
-    public enum TrendContext
-    {
-        None,
-        Bullish,
-        Bearish
-    }
-
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class SilverBulletBot : Robot
     {
@@ -40,7 +33,6 @@ namespace cAlgo.Robots
         private const double RiskRewardRatio = 1.5;
         private const string ContextTimeFrameString = "m15";
         private const string ExecutionTimeFrameString = "m3";
-        private const string ContextTimeFrameForTrendString = "m15";
 
         // Daily Trading Limits
         private int _tradesTakenToday = 0;
@@ -54,13 +46,6 @@ namespace cAlgo.Robots
 
         [Parameter("Swing Candles", DefaultValue = 1, MinValue = 1, MaxValue = 3, Group = "Strategy Parameters")]
         public int SwingCandles { get; set; }
-
-        // Context Parameters
-        [Parameter("Trend Lookback Candles", DefaultValue = 30, MinValue = 5, Group = "Context")]
-        public int ContextLookbackCandles { get; set; }
-
-        [Parameter("Trend Threshold", DefaultValue = 7, MinValue = 1, Group = "Context")]
-        public int ContextTrendThreshold { get; set; }
 
         // New York TimeZoneInfo
         private TimeZoneInfo _newYorkTimeZone;
@@ -97,11 +82,6 @@ namespace cAlgo.Robots
         private DateTime _fvgBarN2_OpenTimeNY = DateTime.MinValue; // FVG Bar N+2 (third bar of 3-bar FVG pattern) OpenTime NY
         private string _currentPendingOrderLabel = null;
         private DateTime _lastDailyResetTimeNY = DateTime.MinValue;
-
-        // Context Trend Fields
-        private TimeFrame _contextTimeFrameForTrend;
-        private TrendContext _currentTrendContext = TrendContext.None;
-        private DateTime _lastContextTrendCalculationTimeNY = DateTime.MinValue;
 
         private TimeSpan _contextTimeFrameTimeSpan; // To help with FVG rect drawing duration
 
@@ -156,18 +136,6 @@ namespace cAlgo.Robots
                 _executionTimeFrame = TimeFrame.Minute3;
             }
 
-            try
-            {
-                _contextTimeFrameForTrend = ParseTimeFrame(ContextTimeFrameForTrendString);
-            }
-            catch (ArgumentException)
-            {
-                Print($"Error parsing ContextTimeFrameForTrendString: '{ContextTimeFrameForTrendString}'. Defaulting to m15.");
-                _contextTimeFrameForTrend = TimeFrame.Minute15;
-            }
-            Print($"Trend Context TimeFrame: {_contextTimeFrameForTrend}");
-            Print($"Trend Lookback Candles: {ContextLookbackCandles}, Trend Threshold: {ContextTrendThreshold}");
-
             Print("Silver Bullet Bot Started.");
             Print("Trading Sessions (NY Time): 03:00-04:00, 10:00-11:00, 14:00-15:00");
             Print($"Liquidity lookback: {MinutesBeforeSessionForLiquidity} minutes before session start.");
@@ -189,7 +157,6 @@ namespace cAlgo.Robots
             var currentTimeNY = GetNewYorkTime(Server.Time);
 
             DailyResetAndSessionTimeUpdate(currentTimeNY);
-            UpdateTrendContext(currentTimeNY);
 
             // Visualize M3 sweeps (if enabled and during session)
             // VisualizeM3Sweeps();
@@ -1167,67 +1134,6 @@ namespace cAlgo.Robots
             Chart.DrawVerticalLine(M3BosConfirmationLineName, serverTime, lineColor, 2, LineStyle.Solid);
         }
 
-        private void UpdateTrendContext(DateTime currentTimeNY)
-        {
-            var contextTFbars = MarketData.GetBars(_contextTimeFrameForTrend);
-            if (contextTFbars.Count < ContextLookbackCandles + 1) // Need at least LookbackCandles + 1 current bar
-            {
-                // Not enough data, or not enough historical data to form a lookback from a fully closed bar
-                if (_currentTrendContext != TrendContext.None)
-                {
-                     Print($"Trend Context: Not enough data on {_contextTimeFrameForTrend} to determine trend (requires {ContextLookbackCandles + 1} bars, have {contextTFbars.Count}). Setting to None.");
-                    _currentTrendContext = TrendContext.None;
-                    _lastContextTrendCalculationTimeNY = DateTime.MinValue; // Reset to allow recalculation when data is available
-                }
-                return;
-            }
-
-            // Use the last fully closed bar for calculation
-            int lastClosedBarIndex = contextTFbars.Count - 2;
-            DateTime lastClosedBarOpenTimeNY = GetNewYorkTime(contextTFbars.OpenTimes[lastClosedBarIndex]);
-
-            if (lastClosedBarOpenTimeNY == _lastContextTrendCalculationTimeNY)
-            {
-                return; // Already calculated for this bar
-            }
-
-            int bullishCount = 0;
-            int bearishCount = 0;
-            int firstBarToAnalyze = Math.Max(0, lastClosedBarIndex - ContextLookbackCandles + 1);
-
-            for (int i = firstBarToAnalyze; i <= lastClosedBarIndex; i++)
-            {
-                if (contextTFbars.ClosePrices[i] > contextTFbars.OpenPrices[i])
-                {
-                    bullishCount++;
-                }
-                else if (contextTFbars.ClosePrices[i] < contextTFbars.OpenPrices[i])
-                {
-                    bearishCount++;
-                }
-            }
-
-            TrendContext previousTrendContext = _currentTrendContext;
-            if (bullishCount - bearishCount >= ContextTrendThreshold)
-            {
-                _currentTrendContext = TrendContext.Bullish;
-            }
-            else if (bearishCount - bullishCount >= ContextTrendThreshold)
-            {
-                _currentTrendContext = TrendContext.Bearish;
-            }
-            else
-            {
-                _currentTrendContext = TrendContext.None;
-            }
-
-            if (_currentTrendContext != previousTrendContext || _lastContextTrendCalculationTimeNY == DateTime.MinValue) // Log on change or first run
-            {
-                Print($"Trend Context ({_contextTimeFrameForTrend}@{ContextLookbackCandles} candles, Thr:{ContextTrendThreshold}): {_currentTrendContext}. Bull: {bullishCount}, Bear: {bearishCount}. Based on bar: {lastClosedBarOpenTimeNY:yyyy-MM-dd HH:mm} NY.");
-            }
-            _lastContextTrendCalculationTimeNY = lastClosedBarOpenTimeNY;
-        }
-
         private void ResetSweepAndBosState(string reason)
         {
             if (!string.IsNullOrWhiteSpace(reason)) // Only print if reason is provided
@@ -1255,33 +1161,6 @@ namespace cAlgo.Robots
             Chart.RemoveObject(M3BosConfirmationLineName);
             // Note: Liquidity lines (LiqHighLineName, LiqLowLineName) are managed by DailyReset or when new liquidity is identified.
             // M3 Sweep visualization lines are managed by VisualizeM3Sweeps itself (cleared on each run).
-        }
-
-        private TimeFrame ParseTimeFrame(string timeFrameString)
-        {
-            if (string.IsNullOrWhiteSpace(timeFrameString))
-            {
-                throw new ArgumentException("TimeFrame string cannot be empty.");
-            }
-
-            switch (timeFrameString.ToLowerInvariant())
-            {
-                case "m1": case "minute1": return TimeFrame.Minute;
-                case "m2": case "minute2": return TimeFrame.Minute2;
-                case "m3": case "minute3": return TimeFrame.Minute3;
-                case "m4": case "minute4": return TimeFrame.Minute4;
-                case "m5": case "minute5": return TimeFrame.Minute5;
-                case "m10": case "minute10": return TimeFrame.Minute10;
-                case "m15": case "minute15": return TimeFrame.Minute15;
-                case "m30": case "minute30": return TimeFrame.Minute30;
-                case "h1": case "hour1": return TimeFrame.Hour;
-                case "h4": case "hour4": return TimeFrame.Hour4;
-                case "d1": case "daily": return TimeFrame.Daily;
-                case "w1": case "weekly": return TimeFrame.Weekly;
-                case "mn1": case "monthly": return TimeFrame.Monthly;
-                default:
-                    throw new ArgumentException($"Could not parse TimeFrame string: {timeFrameString}");
-            }
         }
     }
 }

@@ -95,8 +95,6 @@ namespace cAlgo.Robots
         private DateTime _timeOfLastSweepNY = DateTime.MinValue; // Precise time of sweep (tick time)
         
         // Sweep Bar details on Execution TimeFrame (M1)
-        private double _sweepBarHigh;
-        private double _sweepBarLow;
         private DateTime _sweepBarTimeNY = DateTime.MinValue;
 
         private double _relevantSwingLevelForBOS = 0; // The specific high/low of the M1 swing to be broken for BOS
@@ -305,8 +303,6 @@ namespace cAlgo.Robots
                 _lastSweepType = SweepType.None; // Reset sweep type for new day
                 _relevantSwingLevelForBOS = 0;
                 _sweepBarTimeNY = DateTime.MinValue;
-                _sweepBarHigh = 0;
-                _sweepBarLow = 0;
 
                 // Reset daily limits
                 _tradesTakenToday = 0;
@@ -502,22 +498,22 @@ namespace cAlgo.Robots
                 
                 int sweepBarIndex = executionBars.Count - 1;
                 _sweepBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[sweepBarIndex]);
-                _sweepBarHigh = executionBars.HighPrices[sweepBarIndex];
-                _sweepBarLow = executionBars.LowPrices[sweepBarIndex];
+                double sweepBarHigh = executionBars.HighPrices[sweepBarIndex];
+                double sweepBarLow = executionBars.LowPrices[sweepBarIndex];
 
                 if (detectedSweepThisTick == SweepType.HighSwept)
                 {
-                    DrawSweepLine(sweptLevel.Item2, _lastSweptLiquidityLevel, _sweepBarTimeNY, _sweepBarHigh);
+                    DrawSweepLine(sweptLevel.Item2, _lastSweptLiquidityLevel, _sweepBarTimeNY, sweepBarHigh);
                     }
                 else // LowSwept
                 {
-                    DrawSweepLine(sweptLevel.Item2, _lastSweptLiquidityLevel, _sweepBarTimeNY, _sweepBarLow);
+                    DrawSweepLine(sweptLevel.Item2, _lastSweptLiquidityLevel, _sweepBarTimeNY, sweepBarLow);
                 }
 
                 _liquidityHighs.Clear();
                 _liquidityLows.Clear();
                 
-                Print($"Sweep occurred on M1 bar: {_sweepBarTimeNY:yyyy-MM-dd HH:mm} NY, H: {_sweepBarHigh}, L: {_sweepBarLow}");
+                Print($"Sweep occurred on M1 bar: {_sweepBarTimeNY:yyyy-MM-dd HH:mm} NY, H: {sweepBarHigh}, L: {sweepBarLow}");
                 IdentifyRelevantM1SwingForBOS(_sweepBarTimeNY, _lastSweepType); 
             }
         }
@@ -623,8 +619,6 @@ namespace cAlgo.Robots
                 _relevantSwingLevelForBOS = 0;
                 _relevantSwingBarTimeNY = DateTime.MinValue;
                 _sweepBarTimeNY = DateTime.MinValue;
-                _sweepBarHigh = 0;
-                _sweepBarLow = 0;
                 ClearBosAndFvgDrawings();
                 Chart.RemoveObject(M1BosConfirmationLineName);
                 return;
@@ -912,9 +906,9 @@ namespace cAlgo.Robots
                 return;
             }
 
-            if (_sweepBarHigh == 0 || _sweepBarLow == 0)
+            if (_sweepBarTimeNY == DateTime.MinValue)
             {
-                Print("Error: Sweep bar High/Low for SL not set. Order not placed.");
+                Print("Error: Sweep bar time for SL not set. Order not placed.");
                 ResetSweepAndBosState("Sweep bar details missing for FVG entry.");
                 return;
             }
@@ -933,24 +927,46 @@ namespace cAlgo.Robots
                 }
             }
 
+            var executionBars = MarketData.GetBars(_executionTimeFrame);
+            DateTime sweepBarTimeServer;
+            try 
+            { 
+                sweepBarTimeServer = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZone); 
+            }
+            catch (Exception ex) 
+            {
+                Print($"Error converting sweep bar time for SL calc: {ex.Message}. Order cancelled.");
+                ResetSweepAndBosState("Time conversion error for sweep bar.");
+                return;
+            }
+            int sweepBarIndex = executionBars.OpenTimes.GetIndexByTime(sweepBarTimeServer);
+
+            if (sweepBarIndex < 0)
+            {
+                Print($"Error: Could not find sweep bar index ({_sweepBarTimeNY:HH:mm} NY) for SL calculation. Order not placed.");
+                ResetSweepAndBosState("Sweep bar index not found for FVG entry SL.");
+                return;
+            }
+            double sweepBarHigh = executionBars.HighPrices[sweepBarIndex];
+            double sweepBarLow = executionBars.LowPrices[sweepBarIndex];
+
             double entryPrice, stopLossPrice, takeProfitPrice;
             TradeType tradeType;
             string newOrderLabel = $"SB_FVG_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
-            double stopLossBufferPips = Symbol.PipSize * 2; 
 
             if (bosDirection == SweepType.LowSwept) // Bullish BOS after LowSweep
             {
                 tradeType = TradeType.Buy;
                 entryPrice = _lastFvgDetermined_High; // Entry at the top of Bullish FVG
-                stopLossPrice = _sweepBarLow - stopLossBufferPips; 
-                Print($"FVG Entry Logic: Buy Limit at top of Bullish FVG {_lastFvgDetermined_High}, SL based on M1 Sweep Bar Low: {_sweepBarLow}");
+                stopLossPrice = sweepBarLow; 
+                Print($"FVG Entry Logic: Buy Limit at top of Bullish FVG {_lastFvgDetermined_High}, SL based on M1 Sweep Bar Low: {sweepBarLow}");
             }
             else // Bearish BOS after HighSwept
             {
                 tradeType = TradeType.Sell;
                 entryPrice = _lastFvgDetermined_Low; // Entry at the bottom of Bearish FVG
-                stopLossPrice = _sweepBarHigh + stopLossBufferPips; 
-                Print($"FVG Entry Logic: Sell Limit at bottom of Bearish FVG {_lastFvgDetermined_Low}, SL based on M1 Sweep Bar High: {_sweepBarHigh}");
+                stopLossPrice = sweepBarHigh; 
+                Print($"FVG Entry Logic: Sell Limit at bottom of Bearish FVG {_lastFvgDetermined_Low}, SL based on M1 Sweep Bar High: {sweepBarHigh}");
             }
 
             if ((tradeType == TradeType.Buy && entryPrice <= stopLossPrice) || (tradeType == TradeType.Sell && entryPrice >= stopLossPrice))
@@ -1027,9 +1043,9 @@ namespace cAlgo.Robots
                 return;
             }
 
-            if (_sweepBarHigh == 0 || _sweepBarLow == 0)
+            if (_sweepBarTimeNY == DateTime.MinValue)
             {
-                Print("Error: Sweep bar High/Low for SL not set. Order not placed.");
+                Print("Error: Sweep bar time for SL not set. Order not placed.");
                 ResetSweepAndBosState("Sweep bar details missing for BOS entry.");
                 return;
             }
@@ -1048,24 +1064,46 @@ namespace cAlgo.Robots
                 }
             }
 
+            var executionBars = MarketData.GetBars(_executionTimeFrame);
+            DateTime sweepBarTimeServer;
+            try 
+            { 
+                sweepBarTimeServer = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZone); 
+            }
+            catch (Exception ex) 
+            {
+                Print($"Error converting sweep bar time for SL calc: {ex.Message}. Order cancelled.");
+                ResetSweepAndBosState("Time conversion error for sweep bar.");
+                return;
+            }
+            int sweepBarIndex = executionBars.OpenTimes.GetIndexByTime(sweepBarTimeServer);
+
+            if (sweepBarIndex < 0)
+            {
+                Print($"Error: Could not find sweep bar index ({_sweepBarTimeNY:HH:mm} NY) for SL calculation. Order not placed.");
+                ResetSweepAndBosState("Sweep bar index not found for BOS entry SL.");
+                return;
+            }
+            double sweepBarHigh = executionBars.HighPrices[sweepBarIndex];
+            double sweepBarLow = executionBars.LowPrices[sweepBarIndex];
+
             double entryPrice, stopLossPrice, takeProfitPrice;
             TradeType tradeType;
             string newOrderLabel = $"SB_BOS_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
-            double stopLossBufferPips = Symbol.PipSize * 2; 
 
             if (bosDirection == SweepType.LowSwept) // Bullish BOS after LowSweep
             {
                 tradeType = TradeType.Buy;
                 entryPrice = _relevantSwingLevelForBOS; // Entry at the broken swing high level
-                stopLossPrice = _sweepBarLow - stopLossBufferPips; 
-                Print($"BOS Entry Logic: Buy Limit at broken swing {_relevantSwingLevelForBOS}, SL based on M1 Sweep Bar Low: {_sweepBarLow}");
+                stopLossPrice = sweepBarLow; 
+                Print($"BOS Entry Logic: Buy Limit at broken swing {_relevantSwingLevelForBOS}, SL based on M1 Sweep Bar Low: {sweepBarLow}");
             }
             else // Bearish BOS after HighSwept
             {
                 tradeType = TradeType.Sell;
                 entryPrice = _relevantSwingLevelForBOS; // Entry at the broken swing low level
-                stopLossPrice = _sweepBarHigh + stopLossBufferPips; 
-                Print($"BOS Entry Logic: Sell Limit at broken swing {_relevantSwingLevelForBOS}, SL based on M1 Sweep Bar High: {_sweepBarHigh}");
+                stopLossPrice = sweepBarHigh; 
+                Print($"BOS Entry Logic: Sell Limit at broken swing {_relevantSwingLevelForBOS}, SL based on M1 Sweep Bar High: {sweepBarHigh}");
             }
 
             if ((tradeType == TradeType.Buy && entryPrice <= stopLossPrice) || (tradeType == TradeType.Sell && entryPrice >= stopLossPrice))
@@ -1487,8 +1525,6 @@ namespace cAlgo.Robots
             _relevantSwingLevelForBOS = 0;
             _relevantSwingBarTimeNY = DateTime.MinValue;
             _sweepBarTimeNY = DateTime.MinValue;
-            _sweepBarHigh = 0;
-            _sweepBarLow = 0;
             
             _bosLevel = 0;
             _bosTimeNY = DateTime.MinValue;

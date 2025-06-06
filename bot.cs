@@ -1415,20 +1415,6 @@ namespace cAlgo.Robots
             Chart.RemoveObject(SweepLineName);
             Chart.RemoveObject(SweepTextName);
             
-            if (startTimeNY == DateTime.MinValue || endTimeNY == DateTime.MinValue) return;
-
-            // To make the line visually connect to the body of the sweep candle, let's adjust the end time
-            TimeSpan executionBarDuration = GetTimeFrameTimeSpan(_executionTimeFrame);
-            DateTime effectiveEndTimeNY = endTimeNY.Add(executionBarDuration / 2); // Center of the candle
-
-            DateTime startTimeServer = TimeZoneInfo.ConvertTime(startTimeNY, _newYorkTimeZone, TimeZone);
-            DateTime endTimeServer = TimeZoneInfo.ConvertTime(effectiveEndTimeNY, _newYorkTimeZone, TimeZone);
-
-            Chart.DrawTrendLine(SweepLineName, startTimeServer, startPrice, endTimeServer, endPrice, Color.Black, 1, LineStyle.Dots);
-            // Place text in the middle of the line
-            var midTime = startTimeServer.AddTicks((endTimeServer.Ticks - startTimeServer.Ticks) / 2);
-            var midPrice = startPrice + (endPrice - startPrice) / 2;
-            Chart.DrawText(SweepTextName, "Sweep", midTime, midPrice, Color.Black).VerticalAlignment = VerticalAlignment.Bottom;
         }
 
         private void ResetSweepAndBosState(string reason)

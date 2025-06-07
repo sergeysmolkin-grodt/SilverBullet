@@ -548,7 +548,7 @@ namespace cAlgo.Robots
             // And check if the bars to the right of the original barIndex are all lower
             for (int i = 1; i <= swingCandles; i++)
             {
-                if (barIndex + i >= series.Count || series.HighPrices[barIndex + i] >= peakHigh - tolerance) // Must be clearly lower
+                if (barIndex + i >= series.Count || series.HighPrices[barIndex + i] > peakHigh + tolerance) // Must be clearly lower, relaxed condition
                 {
                     return false;
                 }
@@ -585,7 +585,7 @@ namespace cAlgo.Robots
             // And check if the bars to the right of the original barIndex are all higher
             for (int i = 1; i <= swingCandles; i++)
             {
-                if (barIndex + i >= series.Count || series.LowPrices[barIndex + i] <= peakLow + tolerance) // Must be clearly higher
+                if (barIndex + i >= series.Count || series.LowPrices[barIndex + i] < peakLow - tolerance) // Must be clearly higher, relaxed condition
                 {
                     return false;
                 }
@@ -627,43 +627,47 @@ namespace cAlgo.Robots
             }
 
             // Define the loop range for searching M1 swings before the m1ReferenceBarIndex
-            int loopEndIndex = Math.Max(SwingCandles, m1ReferenceBarIndex - SwingCandles);
-            int loopStartIndex = Math.Max(SwingCandles, m1ReferenceBarIndex - SwingLookbackPeriod);
+            int loopEndIndex = m1ReferenceBarIndex -1; // Start from the bar right before the sweep event
+            int loopStartIndex = Math.Max(1, m1ReferenceBarIndex - SwingLookbackPeriod);
 
 
             if (lastSweepType == SweepType.LowSwept) // After M1 Low sweep, look for an M1 Swing High to break (Bullish BOS)
             {
                 for (int i = loopEndIndex; i >= loopStartIndex; i--)
                 {
-                    if (i < SwingCandles || i >= executionBars.ClosePrices.Count - SwingCandles) continue; 
+                    // User Definition: A bullish candle followed by a bearish candle.
+                    bool isBullishCandleBefore = executionBars.OpenPrices[i - 1] < executionBars.ClosePrices[i - 1];
+                    bool isBearishCandle = executionBars.OpenPrices[i] > executionBars.ClosePrices[i];
 
-                    if (IsSwingHigh(i, executionBars, SwingCandles))
+                    if (isBullishCandleBefore && isBearishCandle)
                     {
-                        _relevantSwingLevelForBOS = executionBars.HighPrices[i];
-                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i]);
-                        Print($"Relevant M1 Swing High for BOS identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY on {_executionTimeFrame}) after M1 Low Sweep.");
+                        _relevantSwingLevelForBOS = Math.Max(executionBars.HighPrices[i - 1], executionBars.HighPrices[i]);
+                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i]); // Time of the second candle in pattern
+                        Print($"Relevant M1 Swing High for BOS (User Definition) identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Pattern End Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after M1 Low Sweep.");
                         DrawBosLevel(_relevantSwingLevelForBOS, _relevantSwingBarTimeNY);
-                        return; // Found swing, exit
+                        return; // Found most recent, exit
                     }
                 }
-                Print($"No relevant M1 Swing High found for BOS within {SwingLookbackPeriod} bars on {_executionTimeFrame} prior to M1 sweep event at {m1SweepBarTimeNY:HH:mm} NY.");
+                Print($"No relevant M1 Swing High (Bullish->Bearish pattern) found for BOS within {SwingLookbackPeriod} bars on {_executionTimeFrame} prior to M1 sweep event at {m1SweepBarTimeNY:HH:mm} NY.");
             }
             else if (lastSweepType == SweepType.HighSwept) // After M1 High sweep, look for an M1 Swing Low to break (Bearish BOS)
             {
                 for (int i = loopEndIndex; i >= loopStartIndex; i--)
                 {
-                    if (i < SwingCandles || i >= executionBars.ClosePrices.Count - SwingCandles) continue; 
-                    
-                    if (IsSwingLow(i, executionBars, SwingCandles))
+                    // User Definition: A bearish candle followed by a bullish candle.
+                    bool isBearishCandleBefore = executionBars.OpenPrices[i - 1] > executionBars.ClosePrices[i - 1];
+                    bool isBullishCandle = executionBars.OpenPrices[i] < executionBars.ClosePrices[i];
+
+                    if (isBearishCandleBefore && isBullishCandle)
                     {
-                        _relevantSwingLevelForBOS = executionBars.LowPrices[i];
-                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i]);
-                        Print($"Relevant M1 Swing Low for BOS identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY on {_executionTimeFrame}) after M1 High Sweep.");
+                        _relevantSwingLevelForBOS = Math.Min(executionBars.LowPrices[i - 1], executionBars.LowPrices[i]);
+                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i]); // Time of the second candle in pattern
+                        Print($"Relevant M1 Swing Low for BOS (User Definition) identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Pattern End Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after M1 High Sweep.");
                         DrawBosLevel(_relevantSwingLevelForBOS, _relevantSwingBarTimeNY);
-                        return; // Found swing, exit
+                        return; // Found most recent, exit
                     }
                 }
-                Print($"No relevant M1 Swing Low found for BOS within {SwingLookbackPeriod} bars on {_executionTimeFrame} prior to M1 sweep event at {m1SweepBarTimeNY:HH:mm} NY.");
+                Print($"No relevant M1 Swing Low (Bearish->Bullish pattern) found for BOS within {SwingLookbackPeriod} bars on {_executionTimeFrame} prior to M1 sweep event at {m1SweepBarTimeNY:HH:mm} NY.");
             }
 
             // If we reach here, no swing was found and returned from within the loops.

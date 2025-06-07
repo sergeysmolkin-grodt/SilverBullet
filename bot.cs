@@ -295,6 +295,8 @@ namespace cAlgo.Robots
                 _session3ActualStartNY = currentTimeNY.Date + TimeSpan.Parse("14:00");
                 _session3ActualEndNY = currentTimeNY.Date + TimeSpan.Parse("15:00");
 
+                DrawSessionTimeLines();
+
                 _liquidityIdentifiedForSession1 = false;
                 _liquidityIdentifiedForSession2 = false;
                 _liquidityIdentifiedForSession3 = false;
@@ -1479,11 +1481,22 @@ namespace cAlgo.Robots
             Chart.RemoveObject(PendingTpTextName);
         }
 
+        private void ClearSessionTimeLines()
+        {
+            for (int i = 1; i <= 3; i++)
+            {
+                Chart.RemoveObject($"Session{i}_Rect");
+                Chart.RemoveObject($"Session{i}_StartLine");
+                Chart.RemoveObject($"Session{i}_EndLine");
+            }
+        }
+
         private void ClearAllStrategyDrawings()
         {
             ClearLiquidityDrawings();
             ClearBosAndFvgDrawings();
             ClearPendingOrderLines();
+            ClearSessionTimeLines();
         }
 
         private void DrawM1BosConfirmationLine(DateTime bosConfirmationBarTimeNY, SweepType originalSweepDirection)
@@ -1512,6 +1525,33 @@ namespace cAlgo.Robots
             Chart.RemoveObject(SweepLineName);
             Chart.RemoveObject(SweepTextName);
             
+        }
+
+        private void DrawSessionTimeLines()
+        {
+            var lineColor = Color.FromArgb(100, Color.Black); // Transparent black
+
+            if (_session1ActualStartNY != DateTime.MinValue)
+            {
+                DateTime startTimeServer = TimeZoneInfo.ConvertTime(_session1ActualStartNY, _newYorkTimeZone, TimeZone);
+                DateTime endTimeServer = TimeZoneInfo.ConvertTime(_session1ActualEndNY, _newYorkTimeZone, TimeZone);
+                Chart.DrawVerticalLine("Session1_StartLine", startTimeServer, lineColor, 1, LineStyle.Solid);
+                Chart.DrawVerticalLine("Session1_EndLine", endTimeServer, lineColor, 1, LineStyle.Solid);
+            }
+            if (_session2ActualStartNY != DateTime.MinValue)
+            {
+                DateTime startTimeServer = TimeZoneInfo.ConvertTime(_session2ActualStartNY, _newYorkTimeZone, TimeZone);
+                DateTime endTimeServer = TimeZoneInfo.ConvertTime(_session2ActualEndNY, _newYorkTimeZone, TimeZone);
+                Chart.DrawVerticalLine("Session2_StartLine", startTimeServer, lineColor, 1, LineStyle.Solid);
+                Chart.DrawVerticalLine("Session2_EndLine", endTimeServer, lineColor, 1, LineStyle.Solid);
+            }
+            if (_session3ActualStartNY != DateTime.MinValue)
+            {
+                DateTime startTimeServer = TimeZoneInfo.ConvertTime(_session3ActualStartNY, _newYorkTimeZone, TimeZone);
+                DateTime endTimeServer = TimeZoneInfo.ConvertTime(_session3ActualEndNY, _newYorkTimeZone, TimeZone);
+                Chart.DrawVerticalLine("Session3_StartLine", startTimeServer, lineColor, 1, LineStyle.Solid);
+                Chart.DrawVerticalLine("Session3_EndLine", endTimeServer, lineColor, 1, LineStyle.Solid);
+            }
         }
 
         private void ResetSweepAndBosState(string reason)

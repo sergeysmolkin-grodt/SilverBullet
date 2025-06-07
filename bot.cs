@@ -707,8 +707,13 @@ namespace cAlgo.Robots
                 if (_relevantSwingBarTimeNY != DateTime.MinValue && bosCandidateBarOpenTimeNY <= _relevantSwingBarTimeNY) 
                     continue;
 
+                var closePrice = executionBars.ClosePrices[bosCandidateBarIndex];
+                var directionText = _lastSweepType == SweepType.HighSwept ? "Bearish" : "Bullish";
+                var comparisonText = _lastSweepType == SweepType.HighSwept ? "<" : ">";
+                Print($"BOS Check ({directionText}): Bar[{bosCandidateBarOpenTimeNY:HH:mm}] Close={closePrice} vs BOS Level={_relevantSwingLevelForBOS}. BOS Needed: Close {comparisonText} Level.");
+
                 bool bosConfirmedThisBar = false;
-                if (_lastSweepType == SweepType.HighSwept && executionBars.ClosePrices[bosCandidateBarIndex] < _relevantSwingLevelForBOS) 
+                if (_lastSweepType == SweepType.HighSwept && closePrice < _relevantSwingLevelForBOS) 
                 {
                     _bosLevel = _relevantSwingLevelForBOS; 
                     _bosTimeNY = bosCandidateBarOpenTimeNY; // M1 bar time
@@ -716,7 +721,7 @@ namespace cAlgo.Robots
                     bosConfirmedThisBar = true;
                     DrawM1BosConfirmationLine(GetNewYorkTime(executionBars.OpenTimes[bosCandidateBarIndex]), SweepType.HighSwept);
                 }
-                else if (_lastSweepType == SweepType.LowSwept && executionBars.ClosePrices[bosCandidateBarIndex] > _relevantSwingLevelForBOS) 
+                else if (_lastSweepType == SweepType.LowSwept && closePrice > _relevantSwingLevelForBOS) 
                 {
                     _bosLevel = _relevantSwingLevelForBOS;
                     _bosTimeNY = bosCandidateBarOpenTimeNY; // M1 bar time
@@ -796,7 +801,7 @@ namespace cAlgo.Robots
             // Timeout for BOS detection on execution timeframe
             int executionTimeFrameMinutes = GetTimeFrameInMinutes(_executionTimeFrame);
             if (executionTimeFrameMinutes == 0) executionTimeFrameMinutes = 1; // safety for division
-            int bosTimeoutBars = (15 * GetTimeFrameInMinutes(_contextTimeFrame)) / executionTimeFrameMinutes; // This is now 15 M1 bars
+            int bosTimeoutBars = (30 * GetTimeFrameInMinutes(_contextTimeFrame)) / executionTimeFrameMinutes; // This is now 30 M1 bars
 
 
             if (executionBars.Count -1 > firstBarToCheckForBOSIndexOnExecutionTF + bosTimeoutBars && firstBarToCheckForBOSIndexOnExecutionTF >=0) 
@@ -1359,7 +1364,7 @@ namespace cAlgo.Robots
                     DateTime startTimeServer = TimeZoneInfo.ConvertTime(highTime, _newYorkTimeZone, TimeZone);
                     DateTime endTimeServer = TimeZoneInfo.ConvertTime(sessionStartTimeNY, _newYorkTimeZone, TimeZone);
                     Chart.DrawTrendLine(LiqHighLineName + i, startTimeServer, high, endTimeServer, high, Color.Blue, 2, LineStyle.Solid);
-                    Chart.DrawText(LiqHighTextName + i, "Liq High", endTimeServer, high, Color.Blue).VerticalAlignment = VerticalAlignment.Bottom;
+                    Chart.DrawText(LiqHighTextName + i, "+", endTimeServer, high, Color.Blue).VerticalAlignment = VerticalAlignment.Bottom;
                 }
             }
 
@@ -1372,7 +1377,7 @@ namespace cAlgo.Robots
                     DateTime startTimeServer = TimeZoneInfo.ConvertTime(lowTime, _newYorkTimeZone, TimeZone);
                     DateTime endTimeServer = TimeZoneInfo.ConvertTime(sessionStartTimeNY, _newYorkTimeZone, TimeZone);
                     Chart.DrawTrendLine(LiqLowLineName + i, startTimeServer, low, endTimeServer, low, Color.Red, 2, LineStyle.Solid);
-                    Chart.DrawText(LiqLowTextName + i, "Liq Low", endTimeServer, low, Color.Red).VerticalAlignment = VerticalAlignment.Bottom;
+                    Chart.DrawText(LiqLowTextName + i, "-", endTimeServer, low, Color.Red).VerticalAlignment = VerticalAlignment.Bottom;
                 }
             }
         }

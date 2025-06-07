@@ -913,10 +913,10 @@ namespace cAlgo.Robots
                 return;
             }
 
-            if (_sweepBarTimeNY == DateTime.MinValue)
+            if (_sweepBarTimeNY == DateTime.MinValue || _bosTimeNY == DateTime.MinValue)
             {
-                Print("Error: Sweep bar time for SL not set. Order not placed.");
-                ResetSweepAndBosState("Sweep bar details missing for FVG entry.");
+                Print("Error: Sweep bar time or BOS time for SL not set. Order not placed.");
+                ResetSweepAndBosState("Sweep/BOS details missing for FVG entry.");
                 return;
             }
 
@@ -936,28 +936,57 @@ namespace cAlgo.Robots
 
             var executionBars = MarketData.GetBars(_executionTimeFrame);
             DateTime sweepBarTimeServer;
-            try 
-            { 
-                sweepBarTimeServer = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZone); 
-            }
-            catch (Exception ex) 
+            DateTime bosBarTimeServer;
+            try
             {
-                Print($"Error converting sweep bar time for SL calc: {ex.Message}. Order cancelled.");
+                sweepBarTimeServer = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZone);
+                bosBarTimeServer = TimeZoneInfo.ConvertTime(_bosTimeNY, _newYorkTimeZone, TimeZone);
+            }
+            catch (Exception ex)
+            {
+                Print($"Error converting sweep/BOS bar time for SL calc: {ex.Message}. Order cancelled.");
                 ResetSweepAndBosState("Time conversion error for sweep bar.");
                 return;
             }
             int sweepBarIndex = executionBars.OpenTimes.GetIndexByTime(sweepBarTimeServer);
+            int bosBarIndex = executionBars.OpenTimes.GetIndexByTime(bosBarTimeServer);
 
-            if (sweepBarIndex < 0)
+            if (sweepBarIndex < 0 || bosBarIndex < 0)
             {
-                Print($"Error: Could not find sweep bar index ({_sweepBarTimeNY:HH:mm} NY) for SL calculation. Order not placed.");
-                ResetSweepAndBosState("Sweep bar index not found for FVG entry SL.");
+                Print($"Error: Could not find sweep bar index ({_sweepBarTimeNY:HH:mm} NY) or BOS bar index ({_bosTimeNY:HH:mm} NY) for SL calculation. Order not placed.");
+                ResetSweepAndBosState("Sweep/BOS bar index not found for FVG entry SL.");
                 return;
             }
-            double sweepBarHigh = executionBars.HighPrices[sweepBarIndex];
-            double sweepBarLow = executionBars.LowPrices[sweepBarIndex];
 
-            double entryPrice, stopLossPrice, takeProfitPrice;
+            double stopLossPrice;
+            if (bosDirection == SweepType.LowSwept) // Bullish, find lowest low for SL
+            {
+                double lowestLow = double.MaxValue;
+                for (int i = sweepBarIndex; i <= bosBarIndex; i++)
+                {
+                    if (executionBars.LowPrices[i] < lowestLow)
+                    {
+                        lowestLow = executionBars.LowPrices[i];
+                    }
+                }
+                stopLossPrice = lowestLow;
+                Print($"SL for Bullish FVG setup calculated as the lowest low between sweep bar {_sweepBarTimeNY:HH:mm} and BOS bar {_bosTimeNY:HH:mm}. SL Price: {stopLossPrice}");
+            }
+            else // Bearish, find highest high for SL
+            {
+                double highestHigh = 0;
+                for (int i = sweepBarIndex; i <= bosBarIndex; i++)
+                {
+                    if (executionBars.HighPrices[i] > highestHigh)
+                    {
+                        highestHigh = executionBars.HighPrices[i];
+                    }
+                }
+                stopLossPrice = highestHigh;
+                Print($"SL for Bearish FVG setup calculated as the highest high between sweep bar {_sweepBarTimeNY:HH:mm} and BOS bar {_bosTimeNY:HH:mm}. SL Price: {stopLossPrice}");
+            }
+
+            double entryPrice, takeProfitPrice;
             TradeType tradeType;
             string newOrderLabel = $"SB_FVG_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
 
@@ -965,29 +994,19 @@ namespace cAlgo.Robots
             {
                 tradeType = TradeType.Buy;
                 entryPrice = _lastFvgDetermined_High; // Entry at the top of Bullish FVG
-                stopLossPrice = sweepBarLow; 
-                Print($"FVG Entry Logic: Buy Limit at top of Bullish FVG {_lastFvgDetermined_High}, SL based on M1 Sweep Bar Low: {sweepBarLow}");
+                Print($"FVG Entry Logic: Buy Limit at top of Bullish FVG {_lastFvgDetermined_High}, SL based on lowest low since sweep: {stopLossPrice}");
             }
             else // Bearish BOS after HighSwept
             {
                 tradeType = TradeType.Sell;
                 entryPrice = _lastFvgDetermined_Low; // Entry at the bottom of Bearish FVG
-                stopLossPrice = sweepBarHigh; 
-                Print($"FVG Entry Logic: Sell Limit at bottom of Bearish FVG {_lastFvgDetermined_Low}, SL based on M1 Sweep Bar High: {sweepBarHigh}");
+                Print($"FVG Entry Logic: Sell Limit at bottom of Bearish FVG {_lastFvgDetermined_Low}, SL based on highest high since sweep: {stopLossPrice}");
             }
 
             if ((tradeType == TradeType.Buy && entryPrice <= stopLossPrice) || (tradeType == TradeType.Sell && entryPrice >= stopLossPrice))
             {
                 Print($"Invalid SL/Entry for FVG trade: Entry {entryPrice}, SL {stopLossPrice} for {tradeType}. Order not placed.");
                 ResetSweepAndBosState("Invalid SL/Entry for FVG entry.");
-                return;
-            }
-            
-            double stopLossInPips = Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize;
-            if (stopLossInPips <= 0.5) 
-            {
-                Print($"Stop loss is too small ({stopLossInPips} pips for FVG entry). Min SL: 0.5 pips. Order not placed.");
-                ResetSweepAndBosState("SL too small for FVG entry.");
                 return;
             }
             
@@ -999,7 +1018,7 @@ namespace cAlgo.Robots
                 return;
             }
 
-            double volume = CalculateOrderVolume(stopLossInPips);
+            double volume = CalculateOrderVolume(Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize);
             if (volume == 0)
             {
                 Print("Calculated volume is zero for FVG entry. Order not placed.");
@@ -1050,10 +1069,10 @@ namespace cAlgo.Robots
                 return;
             }
 
-            if (_sweepBarTimeNY == DateTime.MinValue)
+            if (_sweepBarTimeNY == DateTime.MinValue || _bosTimeNY == DateTime.MinValue)
             {
-                Print("Error: Sweep bar time for SL not set. Order not placed.");
-                ResetSweepAndBosState("Sweep bar details missing for BOS entry.");
+                Print("Error: Sweep bar time or BOS time for SL not set. Order not placed.");
+                ResetSweepAndBosState("Sweep/BOS details missing for BOS entry.");
                 return;
             }
 
@@ -1073,28 +1092,57 @@ namespace cAlgo.Robots
 
             var executionBars = MarketData.GetBars(_executionTimeFrame);
             DateTime sweepBarTimeServer;
-            try 
-            { 
-                sweepBarTimeServer = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZone); 
-            }
-            catch (Exception ex) 
+            DateTime bosBarTimeServer;
+            try
             {
-                Print($"Error converting sweep bar time for SL calc: {ex.Message}. Order cancelled.");
+                sweepBarTimeServer = TimeZoneInfo.ConvertTime(_sweepBarTimeNY, _newYorkTimeZone, TimeZone);
+                bosBarTimeServer = TimeZoneInfo.ConvertTime(_bosTimeNY, _newYorkTimeZone, TimeZone);
+            }
+            catch (Exception ex)
+            {
+                Print($"Error converting sweep/BOS bar time for SL calc: {ex.Message}. Order cancelled.");
                 ResetSweepAndBosState("Time conversion error for sweep bar.");
                 return;
             }
             int sweepBarIndex = executionBars.OpenTimes.GetIndexByTime(sweepBarTimeServer);
+            int bosBarIndex = executionBars.OpenTimes.GetIndexByTime(bosBarTimeServer);
 
-            if (sweepBarIndex < 0)
+            if (sweepBarIndex < 0 || bosBarIndex < 0)
             {
-                Print($"Error: Could not find sweep bar index ({_sweepBarTimeNY:HH:mm} NY) for SL calculation. Order not placed.");
-                ResetSweepAndBosState("Sweep bar index not found for BOS entry SL.");
+                Print($"Error: Could not find sweep bar index ({_sweepBarTimeNY:HH:mm} NY) or BOS bar index ({_bosTimeNY:HH:mm} NY) for SL calculation. Order not placed.");
+                ResetSweepAndBosState("Sweep/BOS bar index not found for BOS entry SL.");
                 return;
             }
-            double sweepBarHigh = executionBars.HighPrices[sweepBarIndex];
-            double sweepBarLow = executionBars.LowPrices[sweepBarIndex];
 
-            double entryPrice, stopLossPrice, takeProfitPrice;
+            double stopLossPrice;
+            if (bosDirection == SweepType.LowSwept) // Bullish, find lowest low for SL
+            {
+                double lowestLow = double.MaxValue;
+                for (int i = sweepBarIndex; i <= bosBarIndex; i++)
+                {
+                    if (executionBars.LowPrices[i] < lowestLow)
+                    {
+                        lowestLow = executionBars.LowPrices[i];
+                    }
+                }
+                stopLossPrice = lowestLow;
+                Print($"SL for Bullish BOS calculated as the lowest low between sweep bar {_sweepBarTimeNY:HH:mm} and BOS bar {_bosTimeNY:HH:mm}. SL Price: {stopLossPrice}");
+            }
+            else // Bearish, find highest high for SL
+            {
+                double highestHigh = 0;
+                for (int i = sweepBarIndex; i <= bosBarIndex; i++)
+                {
+                    if (executionBars.HighPrices[i] > highestHigh)
+                    {
+                        highestHigh = executionBars.HighPrices[i];
+                    }
+                }
+                stopLossPrice = highestHigh;
+                Print($"SL for Bearish BOS calculated as the highest high between sweep bar {_sweepBarTimeNY:HH:mm} and BOS bar {_bosTimeNY:HH:mm}. SL Price: {stopLossPrice}");
+            }
+
+            double entryPrice, takeProfitPrice;
             TradeType tradeType;
             string newOrderLabel = $"SB_BOS_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
 
@@ -1102,29 +1150,19 @@ namespace cAlgo.Robots
             {
                 tradeType = TradeType.Buy;
                 entryPrice = _relevantSwingLevelForBOS; // Entry at the broken swing high level
-                stopLossPrice = sweepBarLow; 
-                Print($"BOS Entry Logic: Buy Limit at broken swing {_relevantSwingLevelForBOS}, SL based on M1 Sweep Bar Low: {sweepBarLow}");
+                Print($"BOS Entry Logic: Buy Limit at broken swing {_relevantSwingLevelForBOS}, SL based on lowest low since sweep: {stopLossPrice}");
             }
             else // Bearish BOS after HighSwept
             {
                 tradeType = TradeType.Sell;
                 entryPrice = _relevantSwingLevelForBOS; // Entry at the broken swing low level
-                stopLossPrice = sweepBarHigh; 
-                Print($"BOS Entry Logic: Sell Limit at broken swing {_relevantSwingLevelForBOS}, SL based on M1 Sweep Bar High: {sweepBarHigh}");
+                Print($"BOS Entry Logic: Sell Limit at broken swing {_relevantSwingLevelForBOS}, SL based on highest high since sweep: {stopLossPrice}");
             }
 
             if ((tradeType == TradeType.Buy && entryPrice <= stopLossPrice) || (tradeType == TradeType.Sell && entryPrice >= stopLossPrice))
             {
                 Print($"Invalid SL/Entry for BOS trade: Entry {entryPrice}, SL {stopLossPrice} for {tradeType}. Order not placed.");
                 ResetSweepAndBosState("Invalid SL/Entry for BOS entry.");
-                return;
-            }
-            
-            double stopLossInPips = Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize;
-            if (stopLossInPips <= 0.5) 
-            {
-                Print($"Stop loss is too small ({stopLossInPips} pips for BOS entry). Min SL: 0.5 pips. Order not placed.");
-                ResetSweepAndBosState("SL too small for BOS entry.");
                 return;
             }
             
@@ -1136,7 +1174,7 @@ namespace cAlgo.Robots
                 return;
             }
             
-            double volume = CalculateOrderVolume(stopLossInPips);
+            double volume = CalculateOrderVolume(Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize);
             if (volume == 0)
             {
                 Print("Calculated volume is zero for BOS entry. Order not placed.");

@@ -51,7 +51,7 @@ namespace cAlgo.Robots
         private const double RiskPercentage = 1.0;
         private const string ContextTimeFrameString = "m1";
         private const string ExecutionTimeFrameString = "m1";
-        private const int MaxLiquidityLevelsToDraw = 5;
+        private const int MaxLiquidityLevelsToDraw = 10;
 
         // Daily Trading Limits
         private int _tradesTakenToday = 0;
@@ -1649,7 +1649,11 @@ namespace cAlgo.Robots
         private double FindTakeProfitLevel(TradeType tradeType, double entryPrice, double stopLossPrice)
         {
             double stopLossPips = Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize;
-            if (stopLossPips <= 0) return 0; // Avoid division by zero
+            if (stopLossPips <= 0.1) 
+            {
+                Print($"Stop loss ({stopLossPips} pips) is too small for TP calculation. Aborting.");
+                return 0;
+            }
 
             double bestTarget = 0;
             double bestTargetRR = 0;
@@ -1657,53 +1661,50 @@ namespace cAlgo.Robots
 
             if (hasPotentialTargets)
             {
-                Print($"Searching for TP among {_tpTargetLiquidityLevels.Count} potential liquidity targets.");
+                Print($"Searching for TP among {_tpTargetLiquidityLevels.Count} potential liquidity targets. SL pips: {stopLossPips:F2}. Entry: {entryPrice}.");
 
                 foreach (var targetLevel in _tpTargetLiquidityLevels)
                 {
                     double potentialTarget = targetLevel.Item1;
-                    Print($"  - Checking target: {potentialTarget}");
-
+                    
                     if (tradeType == TradeType.Buy)
                     {
-                        // For a buy trade, we are looking for a liquidity high to target
-                        if (potentialTarget > entryPrice) // Must be above entry
+                        if (potentialTarget > entryPrice)
                         {
                             double targetPips = (potentialTarget - entryPrice) / Symbol.PipSize;
                             if (targetPips <= 0) continue;
 
                             double currentRR = targetPips / stopLossPips;
-                            Print($"    - Target is valid side. Pips: {targetPips:F2}, RR: {currentRR:F2}. MinRR needed: {MinRiskRewardRatio}");
-                            if (currentRR >= MinRiskRewardRatio)
+                            Print($"  - Checking target {potentialTarget}. RR: {currentRR:F2}. Required range: [{MinRiskRewardRatio} - {MaxRiskRewardRatio}]");
+                            
+                            if (currentRR >= MinRiskRewardRatio && currentRR <= MaxRiskRewardRatio)
                             {
-                                // We found a valid target. We want the closest one in price (lowest valid high).
-                                if (bestTarget == 0 || potentialTarget < bestTarget)
+                                if (bestTarget == 0 || potentialTarget > bestTarget) // Find furthest valid target (highest price for buy)
                                 {
                                     bestTarget = potentialTarget;
                                     bestTargetRR = currentRR;
-                                    Print($"    - >>> New Best TP found: {bestTarget}");
+                                    Print($"    - >>> New Best TP candidate found: {bestTarget} with RR {bestTargetRR:F2}");
                                 }
                             }
                         }
                     }
                     else // Sell Trade
                     {
-                        // For a sell trade, we are looking for a liquidity low to target
-                        if (potentialTarget < entryPrice) // Must be below entry
+                        if (potentialTarget < entryPrice)
                         {
                             double targetPips = (entryPrice - potentialTarget) / Symbol.PipSize;
                             if (targetPips <= 0) continue;
                             
                             double currentRR = targetPips / stopLossPips;
-                            Print($"    - Target is valid side. Pips: {targetPips:F2}, RR: {currentRR:F2}. MinRR needed: {MinRiskRewardRatio}");
-                            if (currentRR >= MinRiskRewardRatio)
+                            Print($"  - Checking target {potentialTarget}. RR: {currentRR:F2}. Required range: [{MinRiskRewardRatio} - {MaxRiskRewardRatio}]");
+
+                            if (currentRR >= MinRiskRewardRatio && currentRR <= MaxRiskRewardRatio)
                             {
-                                // Found a valid target. We want the closest one in price (highest valid low).
-                                if (bestTarget == 0 || potentialTarget > bestTarget)
+                                if (bestTarget == 0 || potentialTarget < bestTarget) // Find furthest valid target (lowest price for sell)
                                 {
                                     bestTarget = potentialTarget;
                                     bestTargetRR = currentRR;
-                                    Print($"    - >>> New Best TP found: {bestTarget}");
+                                    Print($"    - >>> New Best TP candidate found: {bestTarget} with RR {bestTargetRR:F2}");
                                 }
                             }
                         }
@@ -1713,43 +1714,12 @@ namespace cAlgo.Robots
 
             if (bestTarget != 0)
             {
-                // A valid liquidity target was found
-                Print($"Found a potential TP target at liquidity level {bestTarget} with RR {bestTargetRR:F2}.");
-                if (bestTargetRR > MaxRiskRewardRatio)
-                {
-                    Print($"Calculated RR ({bestTargetRR:F2}) exceeds Max RR ({MaxRiskRewardRatio}). Capping TP.");
-                    if (tradeType == TradeType.Buy)
-                    {
-                        return entryPrice + (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);
-                    }
-                    else
-                    {
-                        return entryPrice - (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);
-                    }
-                }
-                return bestTarget; // Use the found liquidity target
+                Print($"Found best TP target at liquidity level {bestTarget} with RR {bestTargetRR:F2}.");
+                return bestTarget;
             }
             
-            // This part is reached if NO suitable liquidity target was found (bestTarget is 0)
-            if (hasPotentialTargets) 
-            {
-                // There were targets, but none of them met the MinRR criteria. Abort the trade.
-                Print($"No liquidity targets found that meet the minimum RR of {MinRiskRewardRatio}. Aborting trade.");
-                return 0; 
-            }
-            else
-            {
-                // There were no liquidity targets to begin with. Use default RR.
-                Print($"No potential liquidity targets available. Using default Max RR {MaxRiskRewardRatio} for TP.");
-                 if (tradeType == TradeType.Buy)
-                {
-                    return entryPrice + (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);
-                }
-                else
-                {
-                    return entryPrice - (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);
-                }
-            }
+            Print($"No liquidity targets found that meet the required RR range [{MinRiskRewardRatio} - {MaxRiskRewardRatio}]. Aborting trade.");
+            return 0;
         }
     }
 }

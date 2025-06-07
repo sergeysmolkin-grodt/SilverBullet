@@ -1059,7 +1059,7 @@ namespace cAlgo.Robots
             {
                 Print("Daily trade limit (3) reached. No more trades today.");
                 ResetSweepAndBosState("Daily trade limit reached.");
-                return; 
+                return;
             }
 
             if (_dailyProfitTargetMet)
@@ -1072,21 +1072,22 @@ namespace cAlgo.Robots
             if (_sweepBarTimeNY == DateTime.MinValue || _bosTimeNY == DateTime.MinValue)
             {
                 Print("Error: Sweep bar time or BOS time for SL not set. Order not placed.");
-                ResetSweepAndBosState("Sweep/BOS details missing for BOS entry.");
+                ResetSweepAndBosState("Sweep/BOS details missing for BOS market entry.");
                 return;
             }
 
+            // Cancel any existing pending orders from other strategies if they exist
             if (!string.IsNullOrEmpty(_currentPendingOrderLabel))
             {
                 var existingOrder = PendingOrders.FirstOrDefault(o => o.Label == _currentPendingOrderLabel);
                 if (existingOrder != null)
                 {
-                    CancelPendingOrderAsync(existingOrder, cr => 
+                    CancelPendingOrderAsync(existingOrder, cr =>
                     {
-                        if (cr.IsSuccessful) Print($"Previous pending order {existingOrder.Label} cancelled for new BOS entry.");
+                        if (cr.IsSuccessful) Print($"Previous pending order {existingOrder.Label} cancelled for new BOS market entry.");
                         else Print($"Failed to cancel previous pending order {existingOrder.Label}: {cr.Error}");
                     });
-                    _currentPendingOrderLabel = null; 
+                    _currentPendingOrderLabel = null;
                 }
             }
 
@@ -1120,10 +1121,7 @@ namespace cAlgo.Robots
                 double lowestLow = double.MaxValue;
                 for (int i = sweepBarIndex; i <= bosBarIndex; i++)
                 {
-                    if (executionBars.LowPrices[i] < lowestLow)
-                    {
-                        lowestLow = executionBars.LowPrices[i];
-                    }
+                    if (executionBars.LowPrices[i] < lowestLow) lowestLow = executionBars.LowPrices[i];
                 }
                 stopLossPrice = lowestLow;
                 Print($"SL for Bullish BOS calculated as the lowest low between sweep bar {_sweepBarTimeNY:HH:mm} and BOS bar {_bosTimeNY:HH:mm}. SL Price: {stopLossPrice}");
@@ -1133,77 +1131,98 @@ namespace cAlgo.Robots
                 double highestHigh = 0;
                 for (int i = sweepBarIndex; i <= bosBarIndex; i++)
                 {
-                    if (executionBars.HighPrices[i] > highestHigh)
-                    {
-                        highestHigh = executionBars.HighPrices[i];
-                    }
+                    if (executionBars.HighPrices[i] > highestHigh) highestHigh = executionBars.HighPrices[i];
                 }
                 stopLossPrice = highestHigh;
                 Print($"SL for Bearish BOS calculated as the highest high between sweep bar {_sweepBarTimeNY:HH:mm} and BOS bar {_bosTimeNY:HH:mm}. SL Price: {stopLossPrice}");
             }
 
-            double entryPrice, takeProfitPrice;
+            double entryPrice;
+            double takeProfitPrice;
             TradeType tradeType;
-            string newOrderLabel = $"SB_BOS_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
+            string newOrderLabel = $"SB_BOS_MKT_{SymbolName}_{Server.Time:yyyyMMddHHmmss}";
 
             if (bosDirection == SweepType.LowSwept) // Bullish BOS after LowSweep
             {
                 tradeType = TradeType.Buy;
-                entryPrice = _relevantSwingLevelForBOS; // Entry at the broken swing high level
-                Print($"BOS Entry Logic: Buy Limit at broken swing {_relevantSwingLevelForBOS}, SL based on lowest low since sweep: {stopLossPrice}");
+                entryPrice = Symbol.Ask; // Current market price for entry
+                Print($"BOS Entry Logic: Buy Market, SL based on lowest low since sweep: {stopLossPrice}");
             }
             else // Bearish BOS after HighSwept
             {
                 tradeType = TradeType.Sell;
-                entryPrice = _relevantSwingLevelForBOS; // Entry at the broken swing low level
-                Print($"BOS Entry Logic: Sell Limit at broken swing {_relevantSwingLevelForBOS}, SL based on highest high since sweep: {stopLossPrice}");
+                entryPrice = Symbol.Bid; // Current market price for entry
+                Print($"BOS Entry Logic: Sell Market, SL based on highest high since sweep: {stopLossPrice}");
             }
 
             if ((tradeType == TradeType.Buy && entryPrice <= stopLossPrice) || (tradeType == TradeType.Sell && entryPrice >= stopLossPrice))
             {
-                Print($"Invalid SL/Entry for BOS trade: Entry {entryPrice}, SL {stopLossPrice} for {tradeType}. Order not placed.");
-                ResetSweepAndBosState("Invalid SL/Entry for BOS entry.");
+                Print($"Invalid SL/Entry for BOS market trade: Entry ~{entryPrice}, SL {stopLossPrice} for {tradeType}. Order not placed.");
+                ResetSweepAndBosState("Invalid SL/Entry for BOS market entry.");
                 return;
             }
-            
+
+            double stopLossInPips = Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize;
+            if (stopLossInPips <= 0.5)
+            {
+                Print($"Stop loss is too small ({stopLossInPips} pips for BOS market entry). Min SL: 0.5 pips. Order not placed.");
+                ResetSweepAndBosState("SL too small for BOS market entry.");
+                return;
+            }
+
             takeProfitPrice = FindTakeProfitLevel(tradeType, entryPrice, stopLossPrice);
             if (takeProfitPrice == 0)
             {
-                Print($"No suitable Take Profit target found meeting Min RR >= {MinRiskRewardRatio} for BOS entry. Order not placed.");
-                ResetSweepAndBosState("Order cancelled due to no valid TP target for BOS entry.");
+                Print($"No suitable Take Profit target found meeting Min RR >= {MinRiskRewardRatio} for BOS market entry. Order not placed.");
+                ResetSweepAndBosState("Order cancelled due to no valid TP target for BOS market entry.");
                 return;
             }
-            
-            double volume = CalculateOrderVolume(Math.Abs(entryPrice - stopLossPrice) / Symbol.PipSize);
+
+            double volume = CalculateOrderVolume(stopLossInPips);
             if (volume == 0)
             {
-                Print("Calculated volume is zero for BOS entry. Order not placed.");
-                ResetSweepAndBosState("Volume is zero for BOS entry.");
+                Print("Calculated volume is zero for BOS market entry. Order not placed.");
+                ResetSweepAndBosState("Volume is zero for BOS market entry.");
                 return;
             }
 
-            if ((tradeType == TradeType.Buy && entryPrice >= Symbol.Ask) || (tradeType == TradeType.Sell && entryPrice <= Symbol.Bid))
-            {
-                Print($"BOS Limit entry {entryPrice} is on the wrong side of current market price. It would fill immediately. Order not placed to avoid slippage.");
-                ResetSweepAndBosState("BOS entry price already passed by market.");
-                return;
-            }
+            Print($"Preparing to place {tradeType} Market Order (BOS Strategy): Label={newOrderLabel}, Vol={volume}, SL={Math.Round(stopLossPrice, Symbol.Digits)}, TP={Math.Round(takeProfitPrice, Symbol.Digits)}");
 
-            Print($"Preparing to place {tradeType} Limit Order (BOS Strategy): Label={newOrderLabel}, Vol={volume}, Entry={Math.Round(entryPrice, Symbol.Digits)}, SL={Math.Round(stopLossPrice, Symbol.Digits)}, TP={Math.Round(takeProfitPrice, Symbol.Digits)}");
-            
-            PlaceLimitOrderAsync(tradeType, SymbolName, volume, entryPrice, newOrderLabel, stopLossPrice, takeProfitPrice, (ProtectionType?)null, tradeResult =>
+            ExecuteMarketOrderAsync(tradeType, SymbolName, volume, newOrderLabel, null, null, tradeResult =>
             {
                 if (tradeResult.IsSuccessful)
                 {
-                    Print($"Successfully placed pending order (BOS) {newOrderLabel}.");
-                    _pendingOrderInfo[newOrderLabel] = new Tuple<double, double>(stopLossPrice, takeProfitPrice);
-                    DrawPendingOrderLines(entryPrice, stopLossPrice, takeProfitPrice);
-                    _currentPendingOrderLabel = newOrderLabel;
+                    Print($"Successfully placed market order (BOS) {newOrderLabel}. Position: {tradeResult.Position.Id}");
+                    var position = tradeResult.Position;
+
+                    var slResult = position.ModifyStopLossPrice(stopLossPrice);
+                    if (slResult.IsSuccessful)
+                    {
+                        Print($"Successfully set SL for position {position.Id} to {stopLossPrice}.");
+                    }
+                    else
+                    {
+                        Print($"Failed to set SL for position {position.Id}: {slResult.Error}");
+                    }
+
+                    var tpResult = position.ModifyTakeProfitPrice(takeProfitPrice);
+                    if (tpResult.IsSuccessful)
+                    {
+                        Print($"Successfully set TP for position {position.Id} to {takeProfitPrice}.");
+                    }
+                    else
+                    {
+                        Print($"Failed to set TP for position {position.Id}: {tpResult.Error}");
+                    }
+                    
+                    // OnPositionOpened will handle _tradesTakenToday++
+                    // Reset state immediately since market order is filled or failed.
+                    ResetSweepAndBosState($"Market order {newOrderLabel} processed, resetting state.");
                 }
                 else
                 {
-                    Print($"Failed to place pending order (BOS) {newOrderLabel}: {tradeResult.Error}.");
-                    ResetSweepAndBosState($"Failed to place BOS order: {tradeResult.Error}");
+                    Print($"Failed to place market order (BOS) {newOrderLabel}: {tradeResult.Error}.");
+                    ResetSweepAndBosState($"Failed to place BOS market order: {tradeResult.Error}");
                 }
             });
         }
@@ -1634,14 +1653,17 @@ namespace cAlgo.Robots
 
             double bestTarget = 0;
             double bestTargetRR = 0;
+            bool hasPotentialTargets = _tpTargetLiquidityLevels != null && _tpTargetLiquidityLevels.Count > 0;
 
-            if (_tpTargetLiquidityLevels != null && _tpTargetLiquidityLevels.Count > 0)
+            if (hasPotentialTargets)
             {
                 Print($"Searching for TP among {_tpTargetLiquidityLevels.Count} potential liquidity targets.");
 
                 foreach (var targetLevel in _tpTargetLiquidityLevels)
                 {
                     double potentialTarget = targetLevel.Item1;
+                    Print($"  - Checking target: {potentialTarget}");
+
                     if (tradeType == TradeType.Buy)
                     {
                         // For a buy trade, we are looking for a liquidity high to target
@@ -1651,6 +1673,7 @@ namespace cAlgo.Robots
                             if (targetPips <= 0) continue;
 
                             double currentRR = targetPips / stopLossPips;
+                            Print($"    - Target is valid side. Pips: {targetPips:F2}, RR: {currentRR:F2}. MinRR needed: {MinRiskRewardRatio}");
                             if (currentRR >= MinRiskRewardRatio)
                             {
                                 // We found a valid target. We want the closest one in price (lowest valid high).
@@ -1658,6 +1681,7 @@ namespace cAlgo.Robots
                                 {
                                     bestTarget = potentialTarget;
                                     bestTargetRR = currentRR;
+                                    Print($"    - >>> New Best TP found: {bestTarget}");
                                 }
                             }
                         }
@@ -1671,6 +1695,7 @@ namespace cAlgo.Robots
                             if (targetPips <= 0) continue;
                             
                             double currentRR = targetPips / stopLossPips;
+                            Print($"    - Target is valid side. Pips: {targetPips:F2}, RR: {currentRR:F2}. MinRR needed: {MinRiskRewardRatio}");
                             if (currentRR >= MinRiskRewardRatio)
                             {
                                 // Found a valid target. We want the closest one in price (highest valid low).
@@ -1678,6 +1703,7 @@ namespace cAlgo.Robots
                                 {
                                     bestTarget = potentialTarget;
                                     bestTargetRR = currentRR;
+                                    Print($"    - >>> New Best TP found: {bestTarget}");
                                 }
                             }
                         }
@@ -1703,10 +1729,18 @@ namespace cAlgo.Robots
                 }
                 return bestTarget; // Use the found liquidity target
             }
+            
+            // This part is reached if NO suitable liquidity target was found (bestTarget is 0)
+            if (hasPotentialTargets) 
+            {
+                // There were targets, but none of them met the MinRR criteria. Abort the trade.
+                Print($"No liquidity targets found that meet the minimum RR of {MinRiskRewardRatio}. Aborting trade.");
+                return 0; 
+            }
             else
             {
-                // No suitable liquidity target found, use default Max RR
-                Print($"No suitable liquidity target found meeting Min RR {MinRiskRewardRatio}. Using default Max RR {MaxRiskRewardRatio} for TP.");
+                // There were no liquidity targets to begin with. Use default RR.
+                Print($"No potential liquidity targets available. Using default Max RR {MaxRiskRewardRatio} for TP.");
                  if (tradeType == TradeType.Buy)
                 {
                     return entryPrice + (stopLossPips * MaxRiskRewardRatio * Symbol.PipSize);

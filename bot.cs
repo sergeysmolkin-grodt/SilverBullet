@@ -48,7 +48,7 @@ namespace cAlgo.Robots
         private const string M1BosConfirmationTextName = "SB_M1BosConfirmationText";
 
         // Strategy Constants
-        private const double RiskPercentage = 1.0;
+        private const double RiskPercentage = 2.0;
         private const string ContextTimeFrameString = "m1";
         private const string ExecutionTimeFrameString = "m1";
         private const int MaxLiquidityLevelsToDraw = 10;
@@ -597,9 +597,8 @@ namespace cAlgo.Robots
         private void IdentifyRelevantM1SwingForBOS(DateTime m1SweepBarTimeNY, SweepType lastSweepType)
         {
             var executionBars = MarketData.GetBars(_executionTimeFrame);
-            if (executionBars.Count == 0) return;
+            if (executionBars.Count < 2) return;
 
-            // Convert M1 sweep bar open time from NY to Server time for GetIndexByTime
             DateTime m1SweepBarOpenTimeServer;
             try
             {
@@ -608,73 +607,70 @@ namespace cAlgo.Robots
             catch (ArgumentException ex)
             {
                 Print($"Error converting M1 sweep bar time for GetIndexByTime: {ex.Message}. NYTime: {m1SweepBarTimeNY}, TargetZone: {TimeZone.DisplayName}");
+                ResetSweepAndBosState($"Error converting sweep time: {ex.Message}");
                 return;
             }
             
-            int m1ReferenceBarIndex = executionBars.OpenTimes.GetIndexByTime(m1SweepBarOpenTimeServer);
+            int m1SweepBarIndex = executionBars.OpenTimes.GetIndexByTime(m1SweepBarOpenTimeServer);
 
-            if (m1ReferenceBarIndex < 0)
+            if (m1SweepBarIndex < 0)
             {
-                Print($"Error: Could not find an M1 bar corresponding to M1 sweep bar open time: {m1SweepBarTimeNY:yyyy-MM-dd HH:mm} NY (Server: {m1SweepBarOpenTimeServer:yyyy-MM-dd HH:mm})");
-                // If we can't find the bar, it's a critical issue for this path, reset sweep state.
-                _lastSweepType = SweepType.None;
-                _relevantSwingLevelForBOS = 0;
-                _relevantSwingBarTimeNY = DateTime.MinValue;
-                _sweepBarTimeNY = DateTime.MinValue;
-                ClearBosAndFvgDrawings();
-                Chart.RemoveObject(M1BosConfirmationLineName);
+                Print($"Error: Could not find M1 bar for sweep time: {m1SweepBarTimeNY:yyyy-MM-dd HH:mm} NY. Cannot identify swing for BOS.");
+                ResetSweepAndBosState("Could not find sweep bar index.");
+                return;
+            }
+            
+            // We look for the first swing pattern that forms *after* the sweep bar.
+            // Loop from the bar after the sweep up to the second to last bar (as we need i+1).
+            int loopStartIndex = m1SweepBarIndex + 1;
+            // Process only confirmed bars. The last bar is still forming.
+            int loopEndIndex = executionBars.Count - 2; 
+
+            // Timeout: If no swing forms within X bars after sweep, reset.
+            int swingSearchTimeoutBars = 30;
+            if (loopEndIndex > m1SweepBarIndex + swingSearchTimeoutBars)
+            {
+                ResetSweepAndBosState($"No relevant swing pattern for BOS found within {swingSearchTimeoutBars} bars after the sweep at {m1SweepBarTimeNY:HH:mm}. Resetting state.");
                 return;
             }
 
-            // Define the loop range for searching M1 swings before the m1ReferenceBarIndex
-            int loopEndIndex = m1ReferenceBarIndex -1; // Start from the bar right before the sweep event
-            int loopStartIndex = Math.Max(1, m1ReferenceBarIndex - SwingLookbackPeriod);
-
-
-            if (lastSweepType == SweepType.LowSwept) // After M1 Low sweep, look for an M1 Swing High to break (Bullish BOS)
+            if (lastSweepType == SweepType.LowSwept) // After Low sweep, we are bullish. Look for a 'high formation' to be broken.
             {
-                for (int i = loopEndIndex; i >= loopStartIndex; i--)
+                for (int i = loopStartIndex; i <= loopEndIndex; i++)
                 {
-                    // User Definition: A bullish candle followed by a bearish candle.
-                    bool isBullishCandleBefore = executionBars.OpenPrices[i - 1] < executionBars.ClosePrices[i - 1];
-                    bool isBearishCandle = executionBars.OpenPrices[i] > executionBars.ClosePrices[i];
+                    // High formation: bullish candle (i), then bearish candle (i+1)
+                    bool isBullishCandle = executionBars.ClosePrices[i] > executionBars.OpenPrices[i];
+                    bool isBearishCandleAfter = executionBars.ClosePrices[i+1] < executionBars.OpenPrices[i+1];
 
-                    if (isBullishCandleBefore && isBearishCandle)
+                    if (isBullishCandle && isBearishCandleAfter)
                     {
-                        _relevantSwingLevelForBOS = Math.Max(executionBars.HighPrices[i - 1], executionBars.HighPrices[i]);
-                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i]); // Time of the second candle in pattern
-                        Print($"Relevant M1 Swing High for BOS (User Definition) identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Pattern End Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after M1 Low Sweep.");
+                        _relevantSwingLevelForBOS = Math.Max(executionBars.HighPrices[i], executionBars.HighPrices[i + 1]);
+                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i + 1]); // Time of the second candle in pattern
+                        Print($"Relevant M1 Swing High for BOS identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Pattern End Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after Low Sweep.");
                         DrawBosLevel(_relevantSwingLevelForBOS, _relevantSwingBarTimeNY);
-                        return; // Found most recent, exit
+                        return; // Found first one, exit
                     }
                 }
-                Print($"No relevant M1 Swing High (Bullish->Bearish pattern) found for BOS within {SwingLookbackPeriod} bars on {_executionTimeFrame} prior to M1 sweep event at {m1SweepBarTimeNY:HH:mm} NY.");
             }
-            else if (lastSweepType == SweepType.HighSwept) // After M1 High sweep, look for an M1 Swing Low to break (Bearish BOS)
+            else if (lastSweepType == SweepType.HighSwept) // After High sweep, we are bearish. Look for a 'low formation' to be broken.
             {
-                for (int i = loopEndIndex; i >= loopStartIndex; i--)
+                for (int i = loopStartIndex; i <= loopEndIndex; i++)
                 {
-                    // User Definition: A bearish candle followed by a bullish candle.
-                    bool isBearishCandleBefore = executionBars.OpenPrices[i - 1] > executionBars.ClosePrices[i - 1];
-                    bool isBullishCandle = executionBars.OpenPrices[i] < executionBars.ClosePrices[i];
+                    // Low formation: bearish candle (i), then bullish candle (i+1)
+                    bool isBearishCandle = executionBars.ClosePrices[i] < executionBars.OpenPrices[i];
+                    bool isBullishCandleAfter = executionBars.ClosePrices[i+1] > executionBars.OpenPrices[i+1];
 
-                    if (isBearishCandleBefore && isBullishCandle)
+                    if (isBearishCandle && isBullishCandleAfter)
                     {
-                        _relevantSwingLevelForBOS = Math.Min(executionBars.LowPrices[i - 1], executionBars.LowPrices[i]);
-                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i]); // Time of the second candle in pattern
-                        Print($"Relevant M1 Swing Low for BOS (User Definition) identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Pattern End Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after M1 High Sweep.");
+                        _relevantSwingLevelForBOS = Math.Min(executionBars.LowPrices[i], executionBars.LowPrices[i + 1]);
+                        _relevantSwingBarTimeNY = GetNewYorkTime(executionBars.OpenTimes[i + 1]); // Time of the second candle in pattern
+                        Print($"Relevant M1 Swing Low for BOS identified at {Math.Round(_relevantSwingLevelForBOS, Symbol.Digits)} (Pattern End Bar: {_relevantSwingBarTimeNY:yyyy-MM-dd HH:mm} NY) after High Sweep.");
                         DrawBosLevel(_relevantSwingLevelForBOS, _relevantSwingBarTimeNY);
-                        return; // Found most recent, exit
+                        return; // Found first one, exit
                     }
                 }
-                Print($"No relevant M1 Swing Low (Bearish->Bullish pattern) found for BOS within {SwingLookbackPeriod} bars on {_executionTimeFrame} prior to M1 sweep event at {m1SweepBarTimeNY:HH:mm} NY.");
             }
-
-            // If we reach here, no swing was found and returned from within the loops.
-            if (_relevantSwingLevelForBOS == 0)
-            {
-                ResetSweepAndBosState($"IdentifyRelevantM1SwingForBOS: No M1 swing found. Resetting sweep state for {lastSweepType}.");
-            }
+            // No swing found yet, will try again on the next tick.
         }
 
         private void CheckForBOSAndFVG(DateTime currentTimeNY)

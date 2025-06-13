@@ -1,0 +1,814 @@
+Symbol¶
+Summary¶
+Represents a currency pair.
+
+Signature
+
+
+public abstract interface Symbol
+Namespace¶
+cAlgo.API.Internals
+
+Examples¶
+
+Example 1
+Example 2
+
+ double bid = Symbol.Bid;
+    double ask = Symbol.Ask;
+    string code = Symbol.Code;
+    int digits = Symbol.Digits;
+    double pipSize = Symbol.PipSize;
+    double pointSize = Symbol.TickSize;
+    double spread = Symbol.Spread;
+
+Methods¶
+NormalizeVolumeInUnits¶
+Summary
+
+Round the volume to the amount suitable for a trade.
+
+Signature
+
+
+public abstract double NormalizeVolumeInUnits(double volume, RoundingMode roundingMode)
+Parameters
+
+Name	Type	Description
+volume	double	Amount to normalize
+roundingMode	RoundingMode	Rounding method
+Return Value
+
+double
+
+Examples
+
+
+ volume = Symbol.NormalizeVolumeInUnits(volume, RoundingMode.Down);
+QuantityToVolumeInUnits¶
+Summary
+
+Convert Quantity (in lots) to Volume in units of base currency.
+
+Signature
+
+
+public abstract double QuantityToVolumeInUnits(double quantity)
+Parameters
+
+Name	Type	Description
+quantity	double	Quantity (lots)
+Return Value
+
+double
+
+VolumeInUnitsToQuantity¶
+Summary
+
+Convert Volume in units of base currency to Quantity (in lots).
+
+Signature
+
+
+public abstract double VolumeInUnitsToQuantity(double volume)
+Parameters
+
+Name	Type	Description
+volume	double	The symbol volume units to convert to Quantity (in lots)
+Return Value
+
+double
+
+GetEstimatedMargin¶
+Summary
+
+Returns the amount of margin you need for x amount of volume.
+
+Signature
+
+
+public abstract double GetEstimatedMargin(TradeType tradeType, double volume)
+Parameters
+
+Name	Type	Description
+tradeType	TradeType	Order trade type
+volume	double	Amount of volume
+Return Value
+
+double
+
+Related Tutorials
+
+Margin Estimations
+VolumeForFixedRisk (2)¶
+VolumeForFixedRisk (1 of 2)
+
+Summary
+
+Calculates the volume to be risked (in X units of the account deposit currency) based on the specified stop loss. Note that the result of this calculation may be imprecise as the exact degree of risk always depends on market movement and is impossible to predict.
+
+Signature
+
+
+public abstract double VolumeForFixedRisk(double amount, double stopLossInPips)
+Parameters
+
+Name	Type	Description
+amount	double	The amount you want to risk in your account deposit currency.
+stopLossInPips	double	The stop loss in pips.
+Return Value
+
+double
+
+VolumeForFixedRisk (2 of 2)
+
+Summary
+
+Calculates the volume to be risked (in X units of the account deposit currency) based on the specified stop loss. Note that the result of this calculation may be imprecise as the exact degree of risk always depends on market movement and is impossible to predict.
+
+Signature
+
+
+public abstract double VolumeForFixedRisk(double amount, double stopLossInPips, RoundingMode roundingMode)
+Parameters
+
+Name	Type	Description
+amount	double	The amount you want to risk in your account deposit currency.
+stopLossInPips	double	The stop loss in pips.
+roundingMode	RoundingMode	The rounding method
+Return Value
+
+double
+
+VolumeForProportionalRisk (2)¶
+VolumeForProportionalRisk (1 of 2)
+
+Summary
+
+Calculates the volume to be risked (in X% of either the account equity or balance) based on the specified stop loss. Note that the result of this calculation may be imprecise as the exact degree of risk always depends on market movement and is impossible to predict.
+
+Signature
+
+
+public abstract double VolumeForProportionalRisk(ProportionalAmountType type, double percentage, double stopLossInPips)
+Parameters
+
+Name	Type	Description
+type	ProportionalAmountType	The type of the amount to be risked (either balance or equity).
+percentage	double	The percentage of equity or balance to be risked.
+stopLossInPips	double	The stop loss in pips.
+Return Value
+
+double
+
+VolumeForProportionalRisk (2 of 2)
+
+Summary
+
+Calculates the volume to be risked (in X% of either the account equity or balance) based on the specified stop loss. Note that the result of this calculation may be imprecise as the exact degree of risk always depends on market movement and is impossible to predict.
+
+Signature
+
+
+public abstract double VolumeForProportionalRisk(ProportionalAmountType type, double percentage, double stopLossInPips, RoundingMode roundingMode)
+Parameters
+
+Name	Type	Description
+type	ProportionalAmountType	The type of the amount to be risked (either balance or equity).
+percentage	double	The percentage of equity or balance to be risked.
+stopLossInPips	double	The stop loss in pips.
+roundingMode	RoundingMode	The rounding method.
+Return Value
+
+double
+
+AmountRisked¶
+Summary
+
+Calculates the amount to be risked based on the specified stop loss and trading volume. Note that the result of this calculation may be imprecise as the exact degree of risk always depends on market movement and is impossible to predict.
+
+Signature
+
+
+public abstract double AmountRisked(double volume, double stopLossInPips)
+Parameters
+
+Name	Type	Description
+volume	double	The volume to be traded
+stopLossInPips	double	The stop loss in pips.
+Return Value
+
+double
+
+PipsForFixedRisk¶
+Summary
+
+Calculates the number of pips to be risked based on the specified stop loss and trading volume. Note that the result of this calculation may be imprecise as the exact degree of risk always depends on market movement and is impossible to predict.
+
+Signature
+
+
+public abstract double PipsForFixedRisk(double amount, double volume)
+Parameters
+
+Name	Type	Description
+amount	double	The amount to be risked.
+volume	double	The volume to be traded.
+Return Value
+
+double
+
+PipsForProportionalRisk¶
+Summary
+
+Calculates the stop loss (in pips) for the proportional amount to be risked based on the specified volume. Note that the result of this calculation may be imprecise as the exact degree of risk always depends on market movement and is impossible to predict.
+
+Signature
+
+
+public abstract double PipsForProportionalRisk(ProportionalAmountType type, double percentage, double volume)
+Parameters
+
+Name	Type	Description
+type	ProportionalAmountType	The type of the amount to be risked (either balance or equity).
+percentage	double	The percentage of equity or balance to be risked.
+volume	double	The volume to be traded.
+Return Value
+
+double
+
+Properties¶
+Ask¶
+Summary
+
+Gets the current ask price for this symbol.
+
+Remarks
+
+The seller's price for the symbol.
+
+Signature
+
+
+public abstract double Ask {get;}
+Return Value
+
+double
+
+Examples
+
+
+ protected override void OnTick()
+ {
+     Print("Ask Price: {0}", Symbol.Ask);
+ }
+Bid¶
+Summary
+
+Gets the current bid price for this symbol.
+
+Remarks
+
+The buyer's price for the symbol.
+
+Signature
+
+
+public abstract double Bid {get;}
+Return Value
+
+double
+
+Examples
+
+
+ protected override void OnTick()
+ {
+     Print("Bid Price: {0}", Symbol.Bid);
+ }
+Spread¶
+Summary
+
+Gets the current spread of this symbol.
+
+Remarks
+
+The difference between the Ask and the Bid price for the symbol.(seeand )
+
+Signature
+
+
+public abstract double Spread {get;}
+Return Value
+
+double
+
+Examples
+
+
+ protected override void OnTick()
+ {
+     Print("The Spread of the symbol is: {0}", Symbol.Spread);
+ }
+PipSize¶
+Summary
+
+Gets the pip size for current symbol.
+
+Signature
+
+
+public abstract double PipSize {get;}
+Return Value
+
+double
+
+Examples
+
+
+ protected override void OnTick()
+ {
+     Print("The current symbol has pip size of: {0}", Symbol.PipSize);
+ }
+Digits¶
+Summary
+
+Gets the number of digits for the symbol.
+
+Signature
+
+
+public abstract int Digits {get;}
+Return Value
+
+int
+
+Examples
+
+
+ protected override void OnTick()
+ {
+     Print("The number of Digits the current symbol  has is: {0}", Symbol.Digits);
+ }
+TickSize¶
+Summary
+
+Gets the tick size for the current symbol.
+
+Remarks
+
+If the symbol is a 5 digit symbol, the tick size is 0.00001.
+
+Signature
+
+
+public abstract double TickSize {get;}
+Return Value
+
+double
+
+Examples
+
+
+ protected override void OnTick()
+ {
+     Print("The current symbol has TickSize: {0}", Symbol.TickSize);
+ }
+VolumeInUnitsMin¶
+Summary
+
+Gets the minimum tradable amount.
+
+Signature
+
+
+public abstract double VolumeInUnitsMin {get;}
+Return Value
+
+double
+
+Examples
+
+
+ if(volume < Symbol.VolumeInUnitsMin)
+ {
+     Print("The minimum volume is {0}", Symbol.VolumeInUnitsMin);
+ }
+VolumeInUnitsMax¶
+Summary
+
+Gets the maximum tradable amount.
+
+Signature
+
+
+public abstract double VolumeInUnitsMax {get;}
+Return Value
+
+double
+
+Examples
+
+
+ if(Symbol.NormalizeVolumeInUnits(volume, RoundingMode.Down) <= Symbol.VolumeInUnitsMax)
+ {
+     volume = Symbol.NormalizeVolumeInUnits(volume, RoundingMode.Down);
+     ExecuteMarketOrder(TradeType.Buy, Symbol.Name, volume);
+ }
+VolumeInUnitsStep¶
+Summary
+
+Gets the minimum trade amount increment.
+
+Signature
+
+
+public abstract double VolumeInUnitsStep {get;}
+Return Value
+
+double
+
+Examples
+
+
+ if(volume + Symbol.VolumeInUnitsStep <= Symbol.VolumeInUnitsMax)
+ {
+     volume += Symbol.VolumeInUnitsStep;
+ }
+PipValue¶
+Summary
+
+Gets the monetary value of one pip.This is the monetary value of one pip of the symbol when you started your cBot or initialized your indicator.Its not updated in real time and it remains constant.
+
+Signature
+
+
+public abstract double PipValue {get;}
+Return Value
+
+double
+
+Examples
+
+
+ var volume = ((Account.Balance*Risk)/StopLoss)/Symbol.PipValue;
+TickValue¶
+Summary
+
+Gets the monetary value of one tick.This is the monetary value of one tick of the symbol when you started your cBot or initialized your indicator.Its not updated in real time and it remains constant.
+
+Signature
+
+
+public abstract double TickValue {get;}
+Return Value
+
+double
+
+Examples
+
+
+ var volume = ((Account.Balance*Risk)/StopLoss)/Symbol.TickValue;
+LotSize¶
+Summary
+
+Gets the size of 1 lot in units of the base currency.
+
+Signature
+
+
+public abstract long LotSize {get;}
+Return Value
+
+long
+
+UnrealizedNetProfit¶
+Summary
+
+Gets the sum of the unrealized Net profits of the positions of this Symbol.
+
+Signature
+
+
+public abstract double UnrealizedNetProfit {get;}
+Return Value
+
+double
+
+UnrealizedGrossProfit¶
+Summary
+
+Gets the sum of the unrealized Gross profits of the positions of this Symbol
+
+Signature
+
+
+public abstract double UnrealizedGrossProfit {get;}
+Return Value
+
+double
+
+BaseAsset¶
+Summary
+
+Gets the symbol base asset.
+
+Signature
+
+
+public abstract Asset BaseAsset {get;}
+Return Value
+
+Asset
+
+QuoteAsset¶
+Summary
+
+Gets the symbol quote asset.
+
+Signature
+
+
+public abstract Asset QuoteAsset {get;}
+Return Value
+
+Asset
+
+PnLConversionFeeRate¶
+Summary
+
+Gets the symbol profit and loss conversion fee rate.
+
+Signature
+
+
+public abstract double PnLConversionFeeRate {get;}
+Return Value
+
+double
+
+Commission¶
+Summary
+
+Gets the amount of base commission for the symbol.
+
+Signature
+
+
+public abstract double Commission {get;}
+Return Value
+
+double
+
+CommissionType¶
+Summary
+
+Gets the symbol base commission calculation type.
+
+Signature
+
+
+public abstract SymbolCommissionType CommissionType {get;}
+Return Value
+
+SymbolCommissionType
+
+MinCommission¶
+Summary
+
+Gets the minimum amount of commission for the symbol.This is the amount of commission that will be paid by trader for any trade.Check MinCommissionType for interpretation of MinCommission value.
+
+Signature
+
+
+public abstract double MinCommission {get;}
+Return Value
+
+double
+
+MinCommissionAsset¶
+Summary
+
+Gets the symbol minimum commission asset.If MinCommissionType is set to Asset then you can use this property to get that asset.The MinCommission value will be converted from MinCommissionAsset to account deposit asset at the moment of trade.
+
+Signature
+
+
+public abstract Asset MinCommissionAsset {get;}
+Return Value
+
+Asset
+
+MinCommissionType¶
+Summary
+
+Gets the symbol minimum commission type.Use this property to interpret MinCommission value.
+
+Signature
+
+
+public abstract SymbolMinCommissionType MinCommissionType {get;}
+Return Value
+
+SymbolMinCommissionType
+
+AdministrativeCharge3DaysRollover¶
+Summary
+
+Gets the Day of the week (in UTC) when Administrative Fee charge amount will be tripled.Only applicable for SWAP free trading accounts.
+
+Signature
+
+
+public abstract DayOfWeek? AdministrativeCharge3DaysRollover {get;}
+Return Value
+
+DayOfWeek?
+
+AdministrativeCharge¶
+Summary
+
+Gets symbol administrative charge.Administrative fee will be charged instead of SWAP if account is marked as SWAP free.Only applicable for SWAP free trading accounts.
+
+Signature
+
+
+public abstract double AdministrativeCharge {get;}
+Return Value
+
+double
+
+GracePeriod¶
+Summary
+
+Gets symbol grace period.This is the number of days free of Administrative fee from the time of opening a position.Only applicable for SWAP free trading accounts.
+
+Signature
+
+
+public abstract int GracePeriod {get;}
+Return Value
+
+int
+
+SwapLong¶
+Summary
+
+Gets the SWAP charge for long positions of the symbol.
+
+Signature
+
+
+public abstract double SwapLong {get;}
+Return Value
+
+double
+
+SwapShort¶
+Summary
+
+Gets the SWAP charge for short positions of the symbol.
+
+Signature
+
+
+public abstract double SwapShort {get;}
+Return Value
+
+double
+
+Swap3DaysRollover¶
+Summary
+
+Gets the Day of the week when Symbol SWAP charge amount will be tripled.
+
+Signature
+
+
+public abstract DayOfWeek? Swap3DaysRollover {get;}
+Return Value
+
+DayOfWeek?
+
+SwapCalculationType¶
+Summary
+
+Gets the symbol SWAP calculation type.
+
+Signature
+
+
+public abstract SymbolSwapCalculationType SwapCalculationType {get;}
+Return Value
+
+SymbolSwapCalculationType
+
+IsTradingEnabled¶
+Summary
+
+Gets If trading is enabled or not for the symbol.
+
+Signature
+
+
+public abstract bool IsTradingEnabled {get;}
+Return Value
+
+bool
+
+TradingMode¶
+Summary
+
+Gets symbol trading mode.
+
+Signature
+
+
+public abstract SymbolTradingMode TradingMode {get;}
+Return Value
+
+SymbolTradingMode
+
+MinDistanceType¶
+Summary
+
+Gets the symbol minimum distances type.
+
+Signature
+
+
+public abstract SymbolMinDistanceType MinDistanceType {get;}
+Return Value
+
+SymbolMinDistanceType
+
+MinTakeProfitDistance¶
+Summary
+
+Gets symbol minimum take profit distance.Use MinDistanceType for interpretation.
+
+Signature
+
+
+public abstract double MinTakeProfitDistance {get;}
+Return Value
+
+double
+
+MinStopLossDistance¶
+Summary
+
+Gets symbol minimum stop loss distance.Use MinDistanceType for interpretation.
+
+Signature
+
+
+public abstract double MinStopLossDistance {get;}
+Return Value
+
+double
+
+DynamicLeverage¶
+Summary
+
+Gets the dynamic leverage tiers for the symbol.
+
+Signature
+
+
+public abstract IReadonlyList<LeverageTier> DynamicLeverage {get;}
+Return Value
+
+IReadonlyList
+
+Examples
+
+
+ var symbolLeverage = Symbol.DynamicLeverage[0].Leverage;
+ var realLeverage = Math.Min(symbolLeverage, Account.PreciseLeverage);
+MarketHours¶
+Summary
+
+Gets access to the symbol's trading sessions schedule.
+
+Signature
+
+
+public abstract MarketHours MarketHours {get;}
+Return Value
+
+MarketHours
+
+Events¶
+Tick¶
+Summary
+
+Occurs on each incoming symbol ticks
+
+Signature
+
+
+public abstract event Action<SymbolTickEventArgs> Tick;
+See Also
+
+cAlgo.API.SymbolTickEventArgs

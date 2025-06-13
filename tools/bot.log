@@ -1,0 +1,8 @@
+2025-06-13 14:30:15,970 - __main__ - INFO - File logging enabled to D:\silverbulletctrader\tools\bot.log
+2025-06-13 14:30:15,970 - __main__ - INFO - Silver Bullet Notifications script started
+2025-06-13 14:30:15,971 - __main__ - INFO - Last cleanup was on '', today is 2025-06-13. Running cleanup.
+2025-06-13 14:30:15,971 - __main__ - INFO - --- Starting Daily Chat History Cleanup ---
+2025-06-13 14:30:15,971 - __main__ - INFO - Message ID file not found. Nothing to clean.
+2025-06-13 14:30:15,972 - __main__ - INFO - Updated last cleanup date to 2025-06-13.
+2025-06-13 14:30:15,972 - __main__ - INFO - Script will run until: 2025-06-14 14:00:15.972384
+2025-06-13 14:30:17,777 - __main__ - INFO - Message sent successfully

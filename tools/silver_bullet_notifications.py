@@ -9,6 +9,11 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
+# File to store message IDs for cleanup
+script_dir = os.path.dirname(os.path.realpath(__file__))
+MESSAGES_FILE = os.path.join(script_dir, 'message_ids.log')
+LAST_CLEANUP_FILE = os.path.join(script_dir, 'last_cleanup.txt')
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -18,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 # Try to set up file logging for PythonAnywhere
 try:
-    script_dir = os.path.dirname(os.path.realpath(__file__))
     log_file = os.path.join(script_dir, 'bot.log')
     file_handler = logging.FileHandler(log_file)
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
@@ -62,10 +66,78 @@ def send_telegram_message(message):
         response = requests.post(url, data=data)
         response.raise_for_status()
         logger.info("Message sent successfully")
+
+        # Store message_id for later cleanup
+        try:
+            result = response.json()
+            if result.get('ok'):
+                message_id = result['result']['message_id']
+                with open(MESSAGES_FILE, 'a') as f:
+                    f.write(f"{message_id}\n")
+        except Exception as e:
+            logger.error(f"Could not store message ID: {str(e)}")
+
         return True
     except Exception as e:
         logger.error(f"Failed to send message: {str(e)}")
         return False
+
+
+def delete_telegram_message(message_id):
+    """Delete a single message from Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "message_id": message_id}
+    
+    try:
+        response = requests.post(url, data=data)
+        if response.status_code == 200:
+            logger.info(f"Successfully deleted message {message_id}")
+            return True
+        else:
+            # It's common for deletion to fail for old messages (e.g., > 48h), so this is a warning.
+            logger.warning(f"Could not delete message {message_id}: {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Exception while deleting message {message_id}: {str(e)}")
+        return False
+
+
+def clear_chat_history():
+    """Reads all message IDs from the log file and deletes them one by one."""
+    logger.info("--- Starting Daily Chat History Cleanup ---")
+    if not os.path.exists(MESSAGES_FILE):
+        logger.info("Message ID file not found. Nothing to clean.")
+        return
+
+    try:
+        with open(MESSAGES_FILE, 'r') as f:
+            message_ids = [line.strip() for line in f if line.strip()]
+        
+        if not message_ids:
+            logger.info("No messages to delete.")
+            # Clear the file anyway in case it just contains whitespace
+            open(MESSAGES_FILE, 'w').close()
+            return
+
+        logger.info(f"Found {len(message_ids)} messages to delete.")
+        
+        deleted_count = 0
+        failed_count = 0
+        for message_id in reversed(message_ids): # Delete from newest to oldest
+            if delete_telegram_message(message_id):
+                deleted_count += 1
+            else:
+                failed_count += 1
+            time.sleep(0.1)  # Brief pause to avoid hitting API rate limits
+
+        logger.info(f"Cleanup complete. Deleted: {deleted_count}, Failed: {failed_count}.")
+
+        # Clear the message ID file after processing
+        open(MESSAGES_FILE, 'w').close()
+        logger.info("Message ID file has been cleared.")
+
+    except Exception as e:
+        logger.error(f"An error occurred during chat history cleanup: {str(e)}")
 
 
 def get_ny_and_utc3_now():
@@ -246,6 +318,25 @@ def send_test_notifications():
 def main():
     """Main function to run continuously."""
     logger.info("Silver Bullet Notifications script started")
+    
+    # --- Daily Cleanup Logic ---
+    try:
+        today_str = datetime.date.today().isoformat()
+        last_cleanup_date = ""
+        if os.path.exists(LAST_CLEANUP_FILE):
+            with open(LAST_CLEANUP_FILE, 'r') as f:
+                last_cleanup_date = f.read().strip()
+
+        if last_cleanup_date != today_str:
+            logger.info(f"Last cleanup was on '{last_cleanup_date}', today is {today_str}. Running cleanup.")
+            clear_chat_history()
+            with open(LAST_CLEANUP_FILE, 'w') as f:
+                f.write(today_str)
+            logger.info(f"Updated last cleanup date to {today_str}.")
+        else:
+            logger.info("Chat history already cleaned up today.")
+    except Exception as e:
+        logger.error(f"Error during daily cleanup check: {str(e)}")
     
     # Set up end time for PythonAnywhere scheduled tasks (run for 23.5 hours)
     end_time = datetime.datetime.now() + datetime.timedelta(hours=23, minutes=30)

@@ -315,10 +315,23 @@ def send_test_notifications():
         logger.error("No upcoming sessions found to use for test notifications")
 
 
+def is_weekend(ny_now):
+    """Check if the given NY time is a Saturday or Sunday."""
+    # Monday is 0, Sunday is 6
+    return ny_now.weekday() == 5 or ny_now.weekday() == 6
+
+
 def main():
     """Main function to run continuously."""
     logger.info("Silver Bullet Notifications script started")
     
+    ny_now, utc3_now = get_ny_and_utc3_now()
+    if is_weekend(ny_now):
+        logger.info("Today is a weekend (Saturday/Sunday) in New York. Notifications will not be sent.")
+        # Optional: Send a single message to confirm script is not running on weekends
+        # send_telegram_message("🚫 <b>Info:</b> Silver Bullet notification system is paused for the weekend.")
+        return # Exit if it's a weekend
+
     # --- Daily Cleanup Logic ---
     try:
         today_str = datetime.date.today().isoformat()

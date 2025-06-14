@@ -48,7 +48,7 @@ namespace cAlgo.Robots
         private const string M1BosConfirmationTextName = "SB_M1BosConfirmationText";
 
         // Strategy Constants
-        private const double RiskPercentage = 2.0;
+        private const double RiskPercentage = 1.0;
         private const string ContextTimeFrameString = "m1";
         private const string ExecutionTimeFrameString = "m1";
         private const int MaxLiquidityLevelsToDraw = 10;
